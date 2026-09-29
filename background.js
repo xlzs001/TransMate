@@ -821,8 +821,9 @@ function parseBatchTranslationOutput(output) {
   });
 }
 
-async function translateChatBatch(items, targetCode) {
-  const normalized = (Array.isArray(items) ? items : [])
+/** 归一聊天批量翻译的输入：最多 16 条，丢掉空文本，给每条一个稳定的序号 id。 */
+function normalizeChatBatchItems(items) {
+  return (Array.isArray(items) ? items : [])
     .slice(0, 16)
     .map((item, index) => ({
       id: String(index),
@@ -830,38 +831,19 @@ async function translateChatBatch(items, targetCode) {
       text: String(item?.text || "").trim()
     }))
     .filter((item) => item.text);
-  if (!normalized.length) return [];
+}
 
-  const settings = await getCfg();
-  const provider = getProviderConfig(settings);
-  const targetName = TARGET_LANGUAGE_NAMES[targetCode] || TARGET_LANGUAGE_NAMES["zh-CN"];
-  const profileInstruction = translationProfileInstruction(settings.translationProfile, "chat");
+/**
+ * 统一的结果形状：客户端 id + 译文 + 硬信息校验警告。
+ * 单条、批量、降级重试三条路径必须给出同一个形状，所以集中在这里。
+ */
+function withWarnings(item, text) {
+  return { id: item.clientId, text, warnings: TLP_VERIFY.verifyTranslation(item.text, text) };
+}
 
-  if (provider.adapter === "googlefree") {
-    requireProviderConfig(provider);
-    return translateGoogleFreeBatch(provider, normalized, targetCode);
-  }
-
-  if (provider.adapter === "deepl") {
-    requireProviderConfig(provider);
-    const target = deepLTargetLanguage(targetCode);
-    const body = new URLSearchParams({ target_lang: target });
-    const formality = deepLFormality(settings.translationProfile, "chat");
-    if (formality) body.set("formality", formality);
-    if (profileInstruction) body.set("context", profileInstruction);
-    normalized.forEach((item) => body.append("text", item.text));
-    const data = await fetchJson(
-      `${String(provider.baseUrl).replace(/\/+$/, "")}/translate`,
-      deepLRequestInit(provider, body)
-    );
-    return normalized.map((item, index) => {
-      const text = String(data?.translations?.[index]?.text || "").trim();
-      return { id: item.clientId, text, warnings: TLP_VERIFY.verifyTranslation(item.text, text) };
-    }).filter((item) => item.text);
-  }
-
-  const payload = normalized.map(({ id, text }) => ({ id, text }));
-  const prompt = `You are an expert multilingual translator.
+/** 批量翻译的提示词：要求模型原样返回每个 id，并且只输出 JSON。 */
+function buildChatBatchPrompt(payload, targetName, profileInstruction) {
+  return `You are an expert multilingual translator.
 
 Translate every item's text into natural, accurate ${targetName}.
 
@@ -878,63 +860,126 @@ Requirements:
 
 Input JSON:
 ${JSON.stringify(payload)}`;
-  // Budget by source volume instead of item count: three long messages need far
-  // more output tokens than twelve short ones, and a count-based budget silently
-  // caps the long batch at a few hundred tokens.
+}
+
+/**
+ * 输出预算按"原文总字符数"算，而不是按条数：
+ * 三条长消息需要的输出远比十二条短消息多，按条数算会把长批次悄悄卡在几百 token。
+ */
+function chatBatchBudget(normalized) {
   const sourceCharacters = normalized.reduce((sum, item) => sum + item.text.length, 0);
-  const batchBudget = Math.min(8000, Math.max(1200, Math.ceil(sourceCharacters * 1.8)));
+  return Math.min(8000, Math.max(1200, Math.ceil(sourceCharacters * 1.8)));
+}
+
+/** 校验批量返回：每个 id 恰好出现一次、都要有译文，不能重复、不能少、不能是空白。 */
+function assertCompleteBatch(parsed, expectedIds) {
+  const returnedIds = new Set();
+  for (const item of parsed) {
+    if (!expectedIds.has(item.id) || returnedIds.has(item.id) || !item.text) {
+      throw new Error("批量翻译返回了重复、未知或空白项目");
+    }
+    returnedIds.add(item.id);
+  }
+  if (returnedIds.size !== expectedIds.size) throw new Error("批量翻译缺少部分项目");
+}
+
+/** DeepL 批量翻译：一次请求带多个 text 字段，译文按顺序返回。 */
+async function translateDeepLBatch(provider, normalized, settings, targetCode, profileInstruction) {
+  const target = deepLTargetLanguage(targetCode);
+  const body = new URLSearchParams({ target_lang: target });
+  const formality = deepLFormality(settings.translationProfile, "chat");
+  if (formality) body.set("formality", formality);
+  if (profileInstruction) body.set("context", profileInstruction);
+  normalized.forEach((item) => body.append("text", item.text));
+  const data = await fetchJson(
+    `${String(provider.baseUrl).replace(/\/+$/, "")}/translate`,
+    deepLRequestInit(provider, body)
+  );
+  return normalized
+    .map((item, index) => withWarnings(item, String(data?.translations?.[index]?.text || "").trim()))
+    .filter((item) => item.text);
+}
+
+/**
+ * 批量请求失败（被截断 / 格式错 / 缺项）时的降级：切成每 4 条一组并发重试。
+ * 单条失败只丢这一条，不连累同组的其它消息 —— 批量已经失败过一次，
+ * 这里再往外抛会把整批消息都变成错误。
+ */
+async function translateItemsIndividually(provider, normalized, settings, targetCode, targetName) {
+  const fallback = [];
+  for (let index = 0; index < normalized.length; index += 4) {
+    const group = normalized.slice(index, index + 4);
+    const results = await Promise.all(group.map(async (item) => {
+      try {
+        const text = await callProvider(provider, {
+          prompt: buildChatTranslationPrompt(item.text, targetName, settings.translationProfile),
+          sourceText: item.text,
+          targetCode,
+          maxOutputTokens: estimateOutputTokens(item.text, 1000, 4000),
+          translationProfile: settings.translationProfile,
+          context: "chat"
+        });
+        return withWarnings(item, String(text || "").trim());
+      } catch (_) {
+        return { id: item.clientId, text: "" };
+      }
+    }));
+    fallback.push(...results.filter((item) => item.text));
+  }
+  return fallback;
+}
+
+/**
+ * 聊天窗口的批量翻译。
+ * 原来这是一个 115 行的函数，输入归一、四种服务商分支、提示词、预算、
+ * 校验、降级重试、结果回填全挤在一起。现在只负责按服务商分发和编排降级。
+ */
+async function translateChatBatch(items, targetCode) {
+  const normalized = normalizeChatBatchItems(items);
+  if (!normalized.length) return [];
+
+  const settings = await getCfg();
+  const provider = getProviderConfig(settings);
+  const targetName = TARGET_LANGUAGE_NAMES[targetCode] || TARGET_LANGUAGE_NAMES["zh-CN"];
+  const profileInstruction = translationProfileInstruction(settings.translationProfile, "chat");
+
+  if (provider.adapter === "googlefree") {
+    requireProviderConfig(provider);
+    return translateGoogleFreeBatch(provider, normalized, targetCode);
+  }
+
+  if (provider.adapter === "deepl") {
+    requireProviderConfig(provider);
+    return translateDeepLBatch(provider, normalized, settings, targetCode, profileInstruction);
+  }
+
+  const payload = normalized.map(({ id, text }) => ({ id, text }));
+  const prompt = buildChatBatchPrompt(payload, targetName, profileInstruction);
 
   let parsed;
   try {
-    // The request stays inside the try so a truncated or malformed batch response
-    // degrades to per-item retries instead of failing every message in the batch.
+    // 请求留在 try 里：截断或格式错的批量返回会降级成逐条重试，
+    // 而不是把这一批消息全判失败。
     const output = await callProvider(provider, {
       prompt,
       sourceText: JSON.stringify(payload),
       targetCode,
-      maxOutputTokens: batchBudget,
+      maxOutputTokens: chatBatchBudget(normalized),
       translationProfile: settings.translationProfile,
       context: "chat"
     });
     parsed = parseBatchTranslationOutput(output);
-    const expectedIds = new Set(normalized.map((item) => item.id));
-    const returnedIds = new Set();
-    for (const item of parsed) {
-      if (!expectedIds.has(item.id) || returnedIds.has(item.id) || !item.text) {
-        throw new Error("批量翻译返回了重复、未知或空白项目");
-      }
-      returnedIds.add(item.id);
-    }
-    if (returnedIds.size !== expectedIds.size) throw new Error("批量翻译缺少部分项目");
+    assertCompleteBatch(parsed, new Set(normalized.map((item) => item.id)));
   } catch (batchError) {
-    const fallback = [];
-    for (let index = 0; index < normalized.length; index += 4) {
-      const group = normalized.slice(index, index + 4);
-      const results = await Promise.all(group.map(async (item) => {
-        try {
-          const text = await callProvider(provider, {
-            prompt: buildChatTranslationPrompt(item.text, targetName, settings.translationProfile),
-            sourceText: item.text,
-            targetCode,
-            maxOutputTokens: estimateOutputTokens(item.text, 1000, 4000),
-            translationProfile: settings.translationProfile,
-            context: "chat"
-          });
-          return { id: item.clientId, text: String(text || "").trim(), warnings: TLP_VERIFY.verifyTranslation(item.text, text) };
-        } catch (_) {
-          return { id: item.clientId, text: "" };
-        }
-      }));
-      fallback.push(...results.filter((item) => item.text));
-    }
+    const fallback = await translateItemsIndividually(provider, normalized, settings, targetCode, targetName);
     if (!fallback.length) throw batchError;
     return fallback;
   }
+
   const byId = new Map(parsed.map((item) => [item.id, item.text]));
-  return normalized.map((item) => {
-    const text = byId.get(item.id) || "";
-    return { id: item.clientId, text, warnings: TLP_VERIFY.verifyTranslation(item.text, text) };
-  }).filter((item) => item.text);
+  return normalized
+    .map((item) => withWarnings(item, byId.get(item.id) || ""))
+    .filter((item) => item.text);
 }
 
 function modelListEndpoint(provider) {

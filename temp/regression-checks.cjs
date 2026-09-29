@@ -743,7 +743,24 @@ async function run() {
     const background = source('background.js');
     assert.match(background, /importScripts\("verify\.js"\)/, '后台应加载 verify.js');
     assert.doesNotMatch(background, /(^|[^.\w])verifyTranslation\(/m, '必须走 TLP_VERIFY 命名空间，裸名会 ReferenceError');
-    assert.equal((background.match(/TLP_VERIFY\.verifyTranslation\(/g) || []).length, 7, '所有翻译出口都要校验');
+
+    // 这里刻意不数"某个函数被调用了几次" —— 那个数字只反映写法，不反映正确性，
+    // 而且新增一个出口时它反而不会报警。直接检查出口本身的形状才是真正防漏的规则：
+    // 凡是返回给客户端的译文对象，都必须带 warnings。
+    // （失败路径的 `text: ""` 没有 warnings，它在到达客户端前就被过滤掉了，不算出口。）
+    const exits = background.split('\n')
+      .map((line, index) => ({ line: line.trim(), number: index + 1 }))
+      .filter(({ line }) => /^return \{ .*\b(?:targetLanguage:|warnings:)/.test(line));
+    assert.ok(exits.length >= 5, `译文出口不该减少，现在只找到 ${exits.length} 处`);
+    for (const { line, number } of exits) {
+      assert.match(line, /\bwarnings:/, `background.js:${number} 的译文出口漏了 warnings`);
+    }
+
+    // 批量路径的三个出口（批量 / DeepL 批量 / 逐条降级）必须共用同一个收口函数，
+    // 否则校验逻辑一散开，就一定会有人漏加其中一条。
+    assert.match(background, /function withWarnings\(item, text\)/, '批量出口要有统一的收口函数');
+    assert.equal((background.match(/(?:return |=> )withWarnings\(item,/g) || []).length, 3,
+      '批量 / DeepL 批量 / 逐条降级 三个出口都要经过 withWarnings');
     assert.match(source('content.js'), /showWarnings\(/, '字段翻译命中后要提示用户');
     assert.match(source('timezone.js'), /tlp-chat-translation-warning/, '聊天译文里要内嵌提示');
   });

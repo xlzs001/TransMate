@@ -44,10 +44,6 @@ const ALLOWED = new Map([
     length: 43, complexity: 24,
     plan: '按「挑选待翻译节点 / 翻译 / 回填」拆三段'
   }],
-  ['background.js:translateChatBatch', {
-    length: 115, complexity: 22,
-    plan: '按服务商拆；callProvider 已经是这个模式，照抄即可'
-  }],
   ['options.js:runProviderAction', {
     length: 46, complexity: 22,
     plan: '按「校验输入 / 发请求 / 回填界面」拆三段'
