@@ -134,7 +134,7 @@ temp/                  开发工具与测试，不打进发布包
   review-checks.cjs      审查项 8 项
   defaults-consistency.cjs  默认值一致性检查
   quality-budget.cjs     质量预算（超标函数名单，兼重构待办）
-  mutation-test.cjs      变异测试 20 点：故意改坏，确认测试真的会红
+  mutation-test.cjs      变异测试 10 点：故意改坏，确认测试真的会红
   relay-smoke.mjs        中转服务冒烟 29 项
   quality-metrics.cjs    AST 级质量度量
   preview-ui.cjs         生成面板预览页
@@ -154,6 +154,8 @@ docs/                  工程文档
 | [`docs/代码质量基线报告.md`](docs/代码质量基线报告.md) | 想知道「现在的代码到底怎么样」，以及该先动哪里 |
 | [`docs/功能与问题盘点.md`](docs/功能与问题盘点.md) | 想知道「现在有哪些功能」和「接下来修什么」 |
 | [`docs/学习路线图.md`](docs/学习路线图.md) | 想借这个项目练手，12 周计划，练习题就用本项目的函数 |
+| [`docs/翻译模块代码审查报告.md`](docs/翻译模块代码审查报告.md) | **历史审查记录**（v3.8.2 时点），想看真实的代码审查长什么样 |
+| [`docs/代码检查与AI润色建议.md`](docs/代码检查与AI润色建议.md) | **历史审查记录**（v3.7.2 时点），同上 |
 | [`安装说明.txt`](安装说明.txt) | 给最终用户的说明书 |
 | `更新说明-v3.9.*.txt` | 逐版本变更记录 |
 

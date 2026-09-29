@@ -2,6 +2,11 @@
   "name": "transmate",
   "version": "3.9.13",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xlzs001/TransMate.git"
+  },
   "description": "TransMate - 外贸翻译与客户时区（Chrome MV3 扩展）",
   "type": "commonjs",
   "scripts": {
