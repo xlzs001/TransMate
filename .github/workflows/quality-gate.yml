@@ -1,0 +1,37 @@
+name: 代码质量门禁
+
+# 每次推送到主分支、以及每个 PR 都跑一遍。
+# 目的：让"能不能合并"由机器说了算，而不是由"我觉得没问题"说了算。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: 静态检查 + 回归测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # 用 npm ci 而不是 npm install：
+      # ci 严格按 package-lock.json 装，保证 CI 和同事本机装出完全一样的依赖树。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 运行门禁
+        run: npm run check
+
+      # 度量数据不卡门禁（它不是"通过/不通过"），但每次都留一份，
+      # 方便看趋势：函数是不是越写越长、重复代码是不是越攒越多。
+      - name: 输出质量度量
+        if: always()
+        run: npm run metrics

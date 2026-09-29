@@ -137,6 +137,23 @@ function presenceModule(config) {
   );
   return sandbox;
 }
+// timezone.js 的"文字系统识别"整段都是纯函数（只依赖正则和入参，不碰 DOM），
+// 可以整段切出来单独跑。重构前它是 42 个分支的 if 链却一条测试都没有 ——
+// 正是"没人测"才让它一路长到 42。现在这段有了保护，改动它才敢放心。
+function scriptDetectModule() {
+  const code = source('timezone.js');
+  const start = code.indexOf('\n  // 文字系统识别');
+  const end = code.indexOf('  function detectSingleLanguage(', start);
+  assert.ok(start > -1 && end > start, 'timezone.js 里应存在文字系统识别模块');
+  const sandbox = { console };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    code.slice(start, end) + '\nglobalThis.scriptApi = { detectByScript, SCRIPT_LANGUAGES };',
+    sandbox,
+    { filename: 'timezone-script.js' }
+  );
+  return sandbox.scriptApi;
+}
 function fakePresenceHeader(presenceText) {
   if (!presenceText) return { querySelector: () => null };
   const subtitle = {
@@ -805,6 +822,39 @@ async function run() {
     assert.match(optionsCode, /\$\("watPresenceIndicator"\)\.checked = settings\.watPresenceIndicator !== false;/, '设置页读取状态开关');
     assert.match(source('timezone.css'), /\.wat-presence\[data-state="online"\]/, '在线状态灯要有样式');
     assert.match(source('timezone.css'), /\.wat-toggle input:checked \+ i/, '快捷开关要有样式');
+  });
+
+  // 文字系统识别：重构前是 42 个分支的 if 链，且零测试覆盖。
+  // 这几条用例把"表驱动"的行为钉死，防止以后往表里加行时改错顺序或置信度。
+  await test('文字系统识别把常见文字映射到正确语言', async () => {
+    const { detectByScript } = scriptDetectModule();
+    assert.deepEqual(plain(detectByScript('你好，这是中文')), ['cmn', 1]);
+    assert.deepEqual(plain(detectByScript('こんにちは')), ['jpn', 1]);
+    assert.deepEqual(plain(detectByScript('안녕하세요')), ['kor', 1]);
+    assert.deepEqual(plain(detectByScript('สวัสดี')), ['tha', 1]);
+    assert.deepEqual(plain(detectByScript('Γειά σου')), ['ell', 1]);
+    assert.deepEqual(plain(detectByScript('שלום')), ['heb', 0.98]);
+  });
+
+  await test('西里尔字母靠专属字母区分语言，细分不出来就交给统计识别', async () => {
+    const { detectByScript } = scriptDetectModule();
+    assert.deepEqual(plain(detectByScript('Привет, ты как')), ['rus', 0.99]);
+    assert.deepEqual(plain(detectByScript('Привіт, як справи')), ['ukr', 0.99]);
+    // 全是西里尔字母但没有任何区分特征时返回 null，让 franc 去做统计识别，
+    // 而不是在这里硬猜一个语言 —— 猜错比不猜更糟。
+    assert.equal(detectByScript('абвгд'), null);
+  });
+
+  await test('阿拉伯字母细分不出来时兜底到标准阿拉伯语', async () => {
+    const { detectByScript } = scriptDetectModule();
+    assert.deepEqual(plain(detectByScript('مرحبا بك')), ['arb', 0.96]);
+    assert.deepEqual(plain(detectByScript('سلام، حال شما چطور است')), ['pes', 0.99]);
+  });
+
+  await test('拉丁字母不归文字系统管，留给统计识别', async () => {
+    const { detectByScript } = scriptDetectModule();
+    assert.equal(detectByScript('hello world'), null);
+    assert.equal(detectByScript(''), null);
   });
 
   const manifest = JSON.parse(source('manifest.json'));

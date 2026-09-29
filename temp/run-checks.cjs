@@ -88,6 +88,22 @@ const GATES = [
         detail: failures.map(item => '- ' + item).join('\n')
       };
     }
+  },
+  {
+    name: '空 catch 有说明',
+    guards: '吞掉异常却不写为什么 —— 半年后没人敢动这段代码',
+    run() {
+      const { analyzeAll } = require('./quality-metrics.cjs');
+      const report = analyzeAll();
+      const undocumented = report.emptyCatches.filter(item => !item.documented);
+      return {
+        ok: undocumented.length === 0,
+        summary: `${report.emptyCatchCount - undocumented.length} / ${report.emptyCatchCount} 有说明`,
+        detail: undocumented
+          .map(item => `- ${item.file}:${item.line} 空 catch 没有说明为什么可以吞`)
+          .join('\n')
+      };
+    }
   }
 ];
 

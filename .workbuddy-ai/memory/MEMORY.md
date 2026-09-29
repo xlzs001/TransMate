@@ -152,3 +152,60 @@ M5（busy 静默丢弃），`review-checks.cjs` 的遗留项已清零。v3.9.7 �
   因为中文识别分不出简繁）。副作用是白花一次 API 调用、并显示一条几乎相同的"译文"。
   想避免只能把范围改成"仅客户发来的消息"。**改动会变更行为，需先问用户。**
 - **聊天会话开启期间每次聊天区变化都重扫全部已加载消息**，长会话有可感知开销；改成只重扫变化的那几条属结构改动。
+
+## 工程质量设施（v3.9.9 建立，2026-09-29）
+
+**真实工作目录是 `C:/Users/hengchu/Desktop/Mark/Mark/TransMate/`**（不是 `TransMatev3.7.3`，那是 v3.9.0 旧副本；
+同级还有 `TransMate-v3.9.5/3.9.7/3.9.8-源码/` 三个目录和 4 个历史 zip，用户尚未决定是否清理）。
+
+### 提交前必跑
+
+```bash
+npm run check      # 6 道门禁，约 1.3 秒
+npm run metrics    # AST 级质量数据
+python temp/build-zip.py   # 打发布包（版本号自动取 manifest.json）
+```
+
+### 6 道门禁（`temp/run-checks.cjs` 统一入口）
+
+1. ESLint（`eslint.config.mjs`，ESLint 9 flat config）
+2. 默认值一致性（`temp/defaults-consistency.cjs`）
+3. 回归测试 40 项（`temp/regression-checks.cjs`）
+4. 审查项 8 项（`temp/review-checks.cjs`）
+5. relay 冒烟 29 项（`temp/relay-smoke.mjs`）
+6. 空 catch 有说明（复用 `quality-metrics.cjs` 的 `analyzeAll()`）
+
+**运行器是进程内编排、不起子进程**。原因：本机沙箱禁止创建子进程
+（`spawnSync`/`execSync`/`execFileSync` 全部 EBUSY，连 `node --version` 都起不来）。
+因此所有检查脚本都是「`module.exports = { run }` + `require.main === module` 入口」结构，
+ESLint 走官方 Node API。**不要改回 spawn 版本**，否则本机无法验证。
+
+### 三份文档 + 一个入口
+
+- `开发说明.md`（入口）
+- `docs/工程规范手册.md`（硬规则 / 软规则 / 评审清单 / 环境约定）
+- `docs/代码质量基线报告.md`（量化基线，所有数字可用 `npm run metrics` 复现）
+- `docs/学习路线图.md`（12 周计划，练习题用本项目函数）
+
+### 质量门禁相关的约定
+
+- **`options.js:DEFAULTS` 是设置默认值的唯一权威**。其余 4 份
+  （`APPEARANCE_DEFAULTS` / `CHAT_DEFAULTS` / `popup.js:DEFAULTS` / `timezone.js:DISPLAY_DEFAULTS`）
+  必须是它的子集。加新设置要同步这 5 处，漏掉 `DISPLAY_DEFAULTS` 不会报错。
+- **空 catch 必须写"为什么可以吞"**（写在 catch 前面或块内第一行都认），否则门禁拦下。
+- **度量脚本要跳过 vendored 区段**（`timezone.js` 2~3231 行，靠 `/* eslint-disable */` 标记）
+  和**顶层 IIFE 外壳**（`findTopLevelWrappers()`），否则统计会被带偏。
+- **`isTrivial`（长度 ≤2 且复杂度 ≤1）不计入长度/复杂度分布**。
+  表驱动重构会引入大量单行取值器，函数总数上涨是好事不是退步。
+- 版本号唯一来源是 `manifest.json`；`options.html` 和 `安装说明.txt` 各有一处 `vX.Y.Z` 必须跟上（有测试守）。
+- CI：`.github/workflows/quality-gate.yml`（`npm ci` + `npm run check` + 输出度量）。
+- git 已初始化，`.gitattributes` 用 `* text=auto`（Windows/Mac 混用避免假 diff）。
+
+### 质量基线（v3.9.9，供下次对比）
+
+自有代码 4100 行（排除 vendored 3230）｜函数 374（103 个单行取值器，271 计入统计）
+函数长度 最长 115 / P90 32 / 中位数 8｜复杂度 最高 32 / P90 12 / 中位数 3
+空 catch 12 处（全部有说明）｜重复代码 11 组（全是默认值表，已被门禁守）
+
+**最该动但还没动的三个**：`timezone.js:4902 update`（复杂度 32 + 94 行）、
+`popup.js:76 render`（复杂度 31，文件仅 135 行）、`background.js:824 translateChatBatch`（115 行）。

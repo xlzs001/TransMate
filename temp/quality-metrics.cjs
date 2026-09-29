@@ -163,11 +163,12 @@ function analyze(file) {
     if (node.type === 'CatchClause' && node.body.body.length === 0) {
       // vendored 区段里的空 catch 是第三方打包产物，不是我们要管的对象
       if (skip.has(node.loc.start.line - 1)) return;
-      // 空 catch 本身不算错，"没写为什么可以吞"才是错。往前看 3 行找注释。
-      const from = Math.max(0, node.loc.start.line - 4);
-      const context = lines.slice(from, node.loc.start.line).join('\n');
-      const documented = /\/\/|\/\*/.test(context) || /\/\/|\/\*/.test(lines[node.loc.start.line - 1] || '');
-      emptyCatches.push({ line: node.loc.start.line, documented });
+      // 空 catch 本身不算错，"没写为什么可以吞"才是错。
+      // 说明可以写在 catch 前面，也可以写在块内的第一行，所以两头都看。
+      const startLine = node.loc.start.line;                 // 1-based，指向 catch 那行
+      const context = lines.slice(Math.max(0, startLine - 4), startLine + 1).join('\n');
+      const documented = /\/\/|\/\*/.test(context);
+      emptyCatches.push({ line: startLine, documented });
     }
   });
 
@@ -208,7 +209,8 @@ function findDuplication(allFiles, window = 6) {
     .sort((a, b) => b.lines - a.lines);
 }
 
-function main() {
+/** 跑完全部分析，返回结构化报告。不打印、不退出，方便被门禁运行器复用。 */
+function analyzeAll() {
   const results = FILES.map(analyze);
   const raw = FILES.map(file => ({ file, ...loadSource(file) }));
   const duplicates = findDuplication(raw);
@@ -216,24 +218,32 @@ function main() {
   const allFunctions = results.flatMap(r => r.functions.map(fn => ({ ...fn, file: r.file })));
   const totalCode = results.reduce((sum, r) => sum + r.codeLines, 0);
 
+  // 2 行以内、且复杂度为 1 的函数，几乎都是查表用的取值器（`() => ["jpn", 1]`）
+  // 或数组回调。它们不该和真正的业务函数一起算中位数，否则"把 if 链改成数据表"
+  // 这种好事反而会让函数总数上涨、看起来像退步。
+  const isTrivial = fn => fn.length <= 2 && fn.complexity <= 1;
+  const substantial = allFunctions.filter(fn => !isTrivial(fn));
+
   const summarize = numbers => {
     const sorted = [...numbers].sort((a, b) => a - b);
     const at = p => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] || 0;
     return { max: sorted.at(-1) || 0, p90: at(0.9), median: at(0.5) };
   };
 
-  const report = {
+  return {
     totalCodeLines: totalCode,
     vendoredLinesExcluded: results.reduce((sum, r) => sum + r.vendored, 0),
     functionCount: allFunctions.length,
-    functionLength: summarize(allFunctions.map(f => f.length)),
-    complexity: summarize(allFunctions.map(f => f.complexity)),
+    trivialFunctionCount: allFunctions.length - substantial.length,
+    substantialFunctionCount: substantial.length,
+    functionLength: summarize(substantial.map(f => f.length)),
+    complexity: summarize(substantial.map(f => f.complexity)),
     emptyCatchCount: results.reduce((sum, r) => sum + r.emptyCatches.length, 0),
     emptyCatchUndocumented: results.reduce((sum, r) => sum + r.emptyCatches.filter(c => !c.documented).length, 0),
     emptyCatches: results.flatMap(r => r.emptyCatches.map(c => ({ file: r.file, line: c.line, documented: c.documented }))),
     duplicateBlocks: duplicates.length,
-    worstByLength: [...allFunctions].sort((a, b) => b.length - a.length).slice(0, 12),
-    worstByComplexity: [...allFunctions].sort((a, b) => b.complexity - a.complexity).slice(0, 12),
+    worstByLength: [...substantial].sort((a, b) => b.length - a.length).slice(0, 12),
+    worstByComplexity: [...substantial].sort((a, b) => b.complexity - a.complexity).slice(0, 12),
     perFile: results.map(r => ({
       file: r.file,
       codeLines: r.codeLines,
@@ -243,17 +253,15 @@ function main() {
     })),
     duplication: duplicates.slice(0, 8)
   };
+}
 
-  if (process.argv.includes('--json')) {
-    console.log(JSON.stringify(report, null, 2));
-    return;
-  }
-
+function printReport(report) {
   const pad = (value, width) => String(value).padEnd(width);
   console.log('=== 代码规模 ===');
   console.log(`自有代码行数（不含注释/空行/第三方）：${report.totalCodeLines}`);
   console.log(`已排除的第三方代码行数：${report.vendoredLinesExcluded}`);
-  console.log(`函数总数：${report.functionCount}`);
+  console.log(`函数总数：${report.functionCount}（其中 ${report.trivialFunctionCount} 个是 2 行以内的取值器/回调，不计入下面的分布）`);
+  console.log(`计入统计的函数：${report.substantialFunctionCount}`);
   console.log();
   console.log('=== 函数长度（行） ===');
   console.log(`最长 ${report.functionLength.max} / P90 ${report.functionLength.p90} / 中位数 ${report.functionLength.median}`);
@@ -287,4 +295,10 @@ function main() {
   }
 }
 
-main();
+module.exports = { analyzeAll, printReport };
+
+if (require.main === module) {
+  const report = analyzeAll();
+  if (process.argv.includes('--json')) console.log(JSON.stringify(report, null, 2));
+  else printReport(report);
+}
