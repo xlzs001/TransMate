@@ -272,7 +272,9 @@
         if (normalize(field.value) === normalize(text)) return true;
         if (expectedCurrent !== null && preserveText(field.value) !== preserveText(expectedCurrent)) return false;
       }
-    } catch (_) {}
+    } catch (_) {
+      // execCommand 在部分站点会被拦截或直接返回 false；失败就往下走 setNativeValue 兜底。
+    }
 
     try {
       if (expectedCurrent !== null && preserveText(field.value) !== preserveText(expectedCurrent)) return false;
@@ -283,7 +285,9 @@
       try {
         const end = text.length;
         field.setSelectionRange?.(end, end);
-      } catch (_) {}
+      } catch (_) {
+        // 只是把光标移到末尾，某些富文本元素不支持；失败不影响写入结果。
+      }
 
       await sleep(80);
       return normalize(field.value) === normalize(text);
@@ -380,8 +384,10 @@
   // ---------------------------------------------------------------------------
 
   async function ensureFocused(field, timeout = 1200) {
-    try { window.focus(); } catch (_) {}
-    try { field?.focus({ preventScroll: true }); } catch (_) {}
+    // 这两步在 iframe 里或非用户手势下会抛异常，属于"尽力而为"：
+    // 失败也不报错，接着走下面的轮询等待窗口获得焦点。
+    try { window.focus(); } catch (_) { /* 非用户手势时浏览器会拒绝 */ }
+    try { field?.focus({ preventScroll: true }); } catch (_) { /* 元素可能已从 DOM 移除 */ }
 
     if (document.hasFocus()) return true;
 
@@ -406,7 +412,9 @@
         await navigator.clipboard.writeText(text);
         return true;
       }
-    } catch (_) {}
+    } catch (_) {
+      // 剪贴板 API 需要窗口聚焦 + 权限，任一不满足都会抛；失败就走下面的 textarea 兜底。
+    }
 
     try {
       const textarea = document.createElement("textarea");
@@ -425,7 +433,7 @@
 
       const ok = document.execCommand("copy");
       textarea.remove();
-      try { previous?.focus?.({ preventScroll: true }); } catch (_) {}
+      try { previous?.focus?.({ preventScroll: true }); } catch (_) { /* 还原焦点失败不影响已完成的复制 */ }
 
       return ok;
     } catch (_) {

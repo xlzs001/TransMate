@@ -79,6 +79,8 @@ function trimProviderError(value) {
 async function fetchJson(url, options = {}, timeoutMs = 30000) {
   const { ok, status, text } = await fetchText(url, options, timeoutMs);
   let data = {};
+  // 上游报错时返回的可能是 HTML 错误页而不是 JSON。解析失败就保持 {}，
+  // 由下面的 !ok 分支统一抛出带原文的错误，不需要在这里区分。
   try { data = text ? JSON.parse(text) : {}; } catch (_) {}
   if (!ok) {
     const message = trimProviderError(data?.error?.message || data?.message || text || `HTTP ${status}`);
@@ -172,6 +174,32 @@ function deepLFormality(profileId, context = "field") {
   return null;
 }
 
+/**
+ * 把项目内的语言码翻成 DeepL 要的目标语言码。
+ * 单条翻译和批量翻译原本各写了一遍（含同一句报错文案），
+ * 抽出来避免只改了其中一处导致两边行为不一致。
+ */
+function deepLTargetLanguage(targetCode) {
+  const target = DEEPL_TARGETS[targetCode] || DEEPL_TARGETS[String(targetCode || "").split("-")[0]];
+  if (!target) throw new Error(`DeepL 暂不支持目标语言：${targetCode}`);
+  return target;
+}
+
+/**
+ * DeepL 的请求头和请求体形式在单条 / 批量两处完全一样：
+ * 固定两条请求头（鉴权 + 表单编码），body 是 URLSearchParams。
+ */
+function deepLRequestInit(provider, body) {
+  return {
+    method: "POST",
+    headers: {
+      Authorization: `DeepL-Auth-Key ${provider.apiKey}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body
+  };
+}
+
 function estimateOutputTokens(text, minimum = 800, maximum = 6000) {
   const inputLength = String(text || "").length;
   return Math.min(maximum, Math.max(minimum, Math.ceil(inputLength * 1.8)));
@@ -246,22 +274,14 @@ async function callProvider(provider, {
   }
 
   if (provider.adapter === "deepl") {
-    const target = DEEPL_TARGETS[targetCode] || DEEPL_TARGETS[String(targetCode || "").split("-")[0]];
-    if (!target) throw new Error(`DeepL 暂不支持目标语言：${targetCode}`);
+    const target = deepLTargetLanguage(targetCode);
     const url = `${String(provider.baseUrl).replace(/\/+$/, "")}/translate`;
     const body = new URLSearchParams({ text: sourceText, target_lang: target });
     const formality = deepLFormality(translationProfile, context);
     if (formality) body.set("formality", formality);
     const profileContext = translationProfileInstruction(translationProfile, context);
     if (profileContext) body.set("context", profileContext);
-    const data = await fetchJson(url, {
-      method: "POST",
-      headers: {
-        Authorization: `DeepL-Auth-Key ${provider.apiKey}`,
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body
-    });
+    const data = await fetchJson(url, deepLRequestInit(provider, body));
     return data?.translations?.[0]?.text?.trim() || "";
   }
 
@@ -339,7 +359,9 @@ async function googleFreePreferredHostName() {
     try {
       const stored = await chrome.storage.session.get("googleFreeHost");
       googleFreePreferredHost = String(stored?.googleFreeHost || "");
-    } catch (_) {}
+    } catch (_) {
+      // 读不到就当作没记过，退回默认域名顺序。session storage 只是加速用的缓存。
+    }
   }
   return googleFreePreferredHost;
 }
@@ -349,7 +371,8 @@ function rememberGoogleFreeHost(host) {
   // 多加一次存储写入；只在域名真的变了的时候写。
   if (googleFreePreferredHost === host) return;
   googleFreePreferredHost = host;
-  try { chrome.storage.session.set({ googleFreeHost: host })?.catch(() => {}); } catch (_) {}
+  // 写缓存失败无所谓：下次翻译重新试一遍，只是少一次加速，不影响功能。
+  try { chrome.storage.session.set({ googleFreeHost: host })?.catch(() => {}); } catch (_) { /* 同上 */ }
 }
 
 function googleFreeHosts(provider) {
@@ -821,21 +844,16 @@ async function translateChatBatch(items, targetCode) {
 
   if (provider.adapter === "deepl") {
     requireProviderConfig(provider);
-    const target = DEEPL_TARGETS[targetCode] || DEEPL_TARGETS[String(targetCode || "").split("-")[0]];
-    if (!target) throw new Error(`DeepL 暂不支持目标语言：${targetCode}`);
+    const target = deepLTargetLanguage(targetCode);
     const body = new URLSearchParams({ target_lang: target });
     const formality = deepLFormality(settings.translationProfile, "chat");
     if (formality) body.set("formality", formality);
     if (profileInstruction) body.set("context", profileInstruction);
     normalized.forEach((item) => body.append("text", item.text));
-    const data = await fetchJson(`${String(provider.baseUrl).replace(/\/+$/, "")}/translate`, {
-      method: "POST",
-      headers: {
-        Authorization: `DeepL-Auth-Key ${provider.apiKey}`,
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body
-    });
+    const data = await fetchJson(
+      `${String(provider.baseUrl).replace(/\/+$/, "")}/translate`,
+      deepLRequestInit(provider, body)
+    );
     return normalized.map((item, index) => {
       const text = String(data?.translations?.[index]?.text || "").trim();
       return { id: item.clientId, text, warnings: TLP_VERIFY.verifyTranslation(item.text, text) };
@@ -981,7 +999,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const values = { watCurrent: payload };
       if (Number.isInteger(tabId)) values[contactSessionKey(tabId)] = payload;
       chrome.storage.session.set(values)?.catch(() => {});
-    } catch (_) {}
+    } catch (_) {
+      // 缓存当前联系人只是为了面板显示更快；存不进去也不该让消息处理中断。
+    }
     return;
   }
 

@@ -4078,6 +4078,8 @@
       localized ||= languageNamesZh.of(iso3);
       promptName = languageNamesEn.of(iso3);
     } catch (_) {
+      // Intl.DisplayNames 在旧版浏览器或缺 ICU 数据的构建里可能抛异常。
+      // 拿不到就退回 ISO 代码本身，语言识别结果不受影响。
     }
     return {
       code,
@@ -4104,47 +4106,91 @@
     if (!winner) return null;
     return makeDetectedLanguage(winner.iso3, Math.min(0.97, 0.73 + winner.hits * 0.06));
   }
+  // ---------------------------------------------------------------------------
+  // 文字系统识别（纯函数，不碰 DOM，可以单独切出来做单元测试）
+  //
+  // 这里原本是一长串 `if (/[\uXXXX-\uXXXX]/.test(text)) return makeDetectedLanguage(...)`，
+  // 圈复杂度 42 —— 但那些分支里一个"决策"都没有，它们只是在查一张固定的表。
+  // 把表还原成数据之后：加一门语言 = 加一行，控制流不变，圈复杂度降到个位数。
+  //
+  // 表的顺序就是优先级，越专属的文字系统排越前。表里每一项是 [正则, 判定函数]，
+  // 判定函数返回 [ISO3, 置信度]；返回 null 表示"文字系统对上了但细分不出来"，
+  // 此时继续往下找，最后落到 franc 统计识别。
+  // ---------------------------------------------------------------------------
+
+  // 西里尔字母：几种语言共用同一段码位，只能靠专属字母区分。
+  var CYRILLIC_LANGUAGES = [
+    [/[іїєґІЇЄҐ]/, "ukr", 0.99],
+    [/[ўЎ]/, "bel", 0.99],
+    [/[ѓќѕЃЌЅ]/, "mkd", 0.99],
+    [/[ђјљњћџЂЈЉЊЋЏ]/, "srp", 0.99],
+    [/[ыэёЫЭЁ]/, "rus", 0.99]
+  ];
+
+  // 阿拉伯字母：同上，注意最后有 arb 兜底。
+  var ARABIC_LANGUAGES = [
+    [/[ښځڅږګړټډڼ]/, "pus", 0.98],
+    [/[ٹڈڑںھہۓے]/, "urd", 0.99],
+    [/[ڭۇۆۈۋې]/, "uig", 0.96],
+    [/[ڵێەڕ]/, "ckb", 0.96],
+    [/[پچژگ]/, "pes", 0.99]
+  ];
+
+  function detectCyrillic(text) {
+    for (const [pattern, iso3, confidence] of CYRILLIC_LANGUAGES) {
+      if (pattern.test(text)) return [iso3, confidence];
+    }
+    return null;                       // 细分不出来，交给 franc 统计识别
+  }
+
+  function detectArabic(text) {
+    for (const [pattern, iso3, confidence] of ARABIC_LANGUAGES) {
+      if (pattern.test(text)) return [iso3, confidence];
+    }
+    return ["arb", 0.96];              // 阿拉伯字母但没命中方言特征，按标准阿拉伯语处理
+  }
+
+  var SCRIPT_LANGUAGES = [
+    [/[\u3040-\u30ff]/, () => ["jpn", 1]],
+    [/[\uac00-\ud7af]/, () => ["kor", 1]],
+    [/[\u4e00-\u9fff]/, () => ["cmn", 1]],
+    [/[\u0e00-\u0e7f]/, () => ["tha", 1]],
+    [/[\u0980-\u09ff]/, text => [/[ৰৱ]/.test(text) ? "asm" : "ben", 0.98]],
+    [/[\u0b80-\u0bff]/, () => ["tam", 1]],
+    [/[\u0a80-\u0aff]/, () => ["guj", 1]],
+    [/[\u0a00-\u0a7f]/, () => ["pan", 0.98]],
+    [/[\u0c00-\u0c7f]/, () => ["tel", 1]],
+    [/[\u0c80-\u0cff]/, () => ["kan", 1]],
+    [/[\u0d00-\u0d7f]/, () => ["mal", 1]],
+    [/[\u0d80-\u0dff]/, () => ["sin", 1]],
+    [/[\u1000-\u109f]/, () => ["mya", 1]],
+    [/[\u1200-\u137f]/, () => ["amh", 0.76]],
+    [/[\u1780-\u17ff]/, () => ["khm", 1]],
+    [/[\u0e80-\u0eff]/, () => ["lao", 1]],
+    [/[\u10a0-\u10ff]/, () => ["kat", 1]],
+    [/[\u0530-\u058f]/, () => ["hye", 1]],
+    [/[\u0590-\u05ff]/, () => ["heb", 0.98]],
+    [/[\u0370-\u03ff]/, () => ["ell", 1]],
+    [/[\u0400-\u04ff]/, detectCyrillic],
+    [/[\u0600-\u06ff]/, detectArabic]
+  ];
+
+  /** 按文字系统猜语言。返回 [ISO3, 置信度] 或 null（表示需要走统计识别）。 */
+  function detectByScript(text) {
+    for (const [pattern, pick] of SCRIPT_LANGUAGES) {
+      if (!pattern.test(text)) continue;
+      const picked = pick(text);
+      if (picked) return picked;
+    }
+    return null;
+  }
+
   function detectSingleLanguage(text) {
     if (!text) return null;
     const hinted = detectLanguageHint(text);
     if (hinted) return hinted;
-    if (/[\u3040-\u30ff]/.test(text)) return makeDetectedLanguage("jpn", 1);
-    if (/[\uac00-\ud7af]/.test(text)) return makeDetectedLanguage("kor", 1);
-    if (/[\u4e00-\u9fff]/.test(text)) return makeDetectedLanguage("cmn", 1);
-    if (/[\u0e00-\u0e7f]/.test(text)) return makeDetectedLanguage("tha", 1);
-    if (/[\u0980-\u09ff]/.test(text)) {
-      return makeDetectedLanguage(/[ৰৱ]/.test(text) ? "asm" : "ben", 0.98);
-    }
-    if (/[\u0b80-\u0bff]/.test(text)) return makeDetectedLanguage("tam", 1);
-    if (/[\u0a80-\u0aff]/.test(text)) return makeDetectedLanguage("guj", 1);
-    if (/[\u0a00-\u0a7f]/.test(text)) return makeDetectedLanguage("pan", 0.98);
-    if (/[\u0c00-\u0c7f]/.test(text)) return makeDetectedLanguage("tel", 1);
-    if (/[\u0c80-\u0cff]/.test(text)) return makeDetectedLanguage("kan", 1);
-    if (/[\u0d00-\u0d7f]/.test(text)) return makeDetectedLanguage("mal", 1);
-    if (/[\u0d80-\u0dff]/.test(text)) return makeDetectedLanguage("sin", 1);
-    if (/[\u1000-\u109f]/.test(text)) return makeDetectedLanguage("mya", 1);
-    if (/[\u1200-\u137f]/.test(text)) return makeDetectedLanguage("amh", 0.76);
-    if (/[\u1780-\u17ff]/.test(text)) return makeDetectedLanguage("khm", 1);
-    if (/[\u0e80-\u0eff]/.test(text)) return makeDetectedLanguage("lao", 1);
-    if (/[\u10a0-\u10ff]/.test(text)) return makeDetectedLanguage("kat", 1);
-    if (/[\u0530-\u058f]/.test(text)) return makeDetectedLanguage("hye", 1);
-    if (/[\u0590-\u05ff]/.test(text)) return makeDetectedLanguage("heb", 0.98);
-    if (/[\u0370-\u03ff]/.test(text)) return makeDetectedLanguage("ell", 1);
-    if (/[\u0400-\u04ff]/.test(text)) {
-      if (/[іїєґІЇЄҐ]/.test(text)) return makeDetectedLanguage("ukr", 0.99);
-      if (/[ўЎ]/.test(text)) return makeDetectedLanguage("bel", 0.99);
-      if (/[ѓќѕЃЌЅ]/.test(text)) return makeDetectedLanguage("mkd", 0.99);
-      if (/[ђјљњћџЂЈЉЊЋЏ]/.test(text)) return makeDetectedLanguage("srp", 0.99);
-      if (/[ыэёЫЭЁ]/.test(text)) return makeDetectedLanguage("rus", 0.99);
-    }
-    if (/[\u0600-\u06ff]/.test(text)) {
-      if (/[ښځڅږګړټډڼ]/.test(text)) return makeDetectedLanguage("pus", 0.98);
-      if (/[ٹڈڑںھہۓے]/.test(text)) return makeDetectedLanguage("urd", 0.99);
-      if (/[ڭۇۆۈۋې]/.test(text)) return makeDetectedLanguage("uig", 0.96);
-      if (/[ڵێەڕ]/.test(text)) return makeDetectedLanguage("ckb", 0.96);
-      if (/[پچژگ]/.test(text)) return makeDetectedLanguage("pes", 0.99);
-      return makeDetectedLanguage("arb", 0.96);
-    }
+    const byScript = detectByScript(text);
+    if (byScript) return makeDetectedLanguage(byScript[0], byScript[1]);
     const letters = text.replace(/[^\p{L}\p{M}\s']/gu, " ").replace(/\s+/g, " ").trim();
     if (letters.length < 8) return null;
     const ranked = francAll(letters, { minLength: 8 }).filter(([iso32]) => iso32 !== "und");

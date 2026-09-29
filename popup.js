@@ -52,7 +52,9 @@ async function load() {
     try {
       const url = new URL(tab?.url || "");
       if (["http:", "https:"].includes(url.protocol)) host = url.hostname.replace(/^www\./, "");
-    } catch (_) {}
+    } catch (_) {
+      // 当前标签页可能是 chrome:// 或扩展页，URL 构造不出来；此时保持 host 为空。
+    }
 
     config = { ...DEFAULTS, ...(await chrome.storage.local.get(DEFAULTS)) };
     // 与后台保持一致：老用户沿用 Gemini，新装用户默认免费档。
