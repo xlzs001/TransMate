@@ -1,0 +1,25 @@
+{
+  "name": "transmate",
+  "version": "3.9.8",
+  "private": true,
+  "description": "TransMate - 外贸翻译与客户时区（Chrome MV3 扩展）",
+  "type": "commonjs",
+  "scripts": {
+    "check": "node temp/run-checks.cjs",
+    "check:verbose": "node temp/run-checks.cjs --verbose",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "node temp/run-checks.cjs",
+    "test:regression": "node temp/regression-checks.cjs",
+    "test:review": "node temp/review-checks.cjs",
+    "test:defaults": "node temp/defaults-consistency.cjs",
+    "test:relay": "node temp/relay-smoke.mjs",
+    "metrics": "node temp/quality-metrics.cjs",
+    "preview": "node temp/preview-ui.cjs"
+  },
+  "devDependencies": {
+    "acorn": "^8.15.0",
+    "eslint": "^9.39.0",
+    "globals": "^16.5.0"
+  }
+}

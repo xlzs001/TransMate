@@ -1,0 +1,30 @@
+# TransMate 翻译中转 —— Cloudflare Worker 配置
+#
+# 用法（在 relay 目录下执行）：
+#   npx wrangler deploy
+#
+# 说明：
+#   - main 指向同目录的 worker.js。
+#   - 不写 routes 也能部署，会得到一个 *.workers.dev 地址；
+#     但该地址在中国大陆通常不可达，正式使用请务必绑定自己的域名（见 README）。
+#   - RELAY_TOKEN 建议用命令行写入，不要写进本文件后提交到代码仓库：
+#       npx wrangler secret put RELAY_TOKEN
+
+name = "transmate-relay"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# 绑定自定义域名（需要该域名已托管在 Cloudflare）。
+# 取消注释并改成你自己的域名后执行 npx wrangler deploy 即可。
+#
+# routes = [
+#   { pattern = "translate.你的域名.com", custom_domain = true }
+# ]
+#
+# 如果不想用自定义域名、只想挂在某个域名的子路径下，可以改用：
+# routes = [
+#   { pattern = "你的域名.com/relay/*", zone_name = "你的域名.com" }
+# ]
+
+[observability]
+enabled = true

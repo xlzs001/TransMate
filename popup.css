@@ -1,0 +1,44 @@
+:root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { width: 342px; margin: 0; background: #f4f7f6; color: #17212b; }
+main { padding: 15px; }
+button { font: inherit; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 2px 14px; }
+.brand img { border-radius: 8px; }
+.brand h1 { margin: 0; font-size: 15px; letter-spacing: -.1px; }
+.brand p { margin: 2px 0 0; color: #78878f; font-size: 10px; }
+.icon-button { margin-left: auto; width: 31px; height: 31px; border: 0; border-radius: 9px; background: #e8efec; color: #52635b; cursor: pointer; }
+.feature-card { margin-bottom: 10px; padding: 13px; border: 1px solid #e0e7e4; border-radius: 13px; background: #fff; box-shadow: 0 4px 15px rgba(30,54,48,.04); }
+.feature-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.feature-heading > div { display: grid; gap: 2px; }
+.feature-heading strong { font-size: 13px; }
+.eyebrow { color: #6f7e86; font-size: 8px; font-weight: 850; letter-spacing: 1px; text-transform: uppercase; }
+.eyebrow.green { color: #008069; }
+.badge { padding: 3px 8px; border-radius: 99px; background: #e7eeeb; color: #64736c; font-size: 10px; font-weight: 800; }
+.badge.on { background: #dff5ed; color: #08765f; }
+.badge.off { background: #f8e5e3; color: #9c3d34; }
+.trigger { margin-top: 12px; padding: 9px; border-radius: 9px; background: #f3f6f5; color: #4b5b54; text-align: center; font-size: 12px; }
+.trigger b { color: #17212b; font-size: 16px; }
+.meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; color: #849189; font-size: 9px; }
+.meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subtle { width: 100%; margin-top: 10px; padding: 7px 9px; border: 0; border-radius: 8px; background: #edf2f0; color: #43534c; font-size: 11px; font-weight: 700; cursor: pointer; }
+.warning { margin-top: 8px; padding: 7px 9px; border-radius: 8px; background: #fff4d8; color: #8a5a08; font-size: 10px; }
+.switch { cursor: pointer; }
+.switch input { position: absolute; opacity: 0; }
+.switch span { position: relative; display: block; width: 34px; height: 20px; border-radius: 99px; background: #cbd5d1; transition: .16s; }
+.switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: .16s; }
+.switch input:checked + span { background: #008069; }
+.switch input:checked + span::after { transform: translateX(14px); }
+.contact-name { margin-top: 12px; overflow: hidden; color: #5c6b64; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.time-summary { margin-top: 4px; color: #008069; font-size: 19px; font-weight: 750; }
+.timezone-meta { margin-top: 3px; color: #8a9690; font-size: 9px; }
+.language-control { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 11px; padding-top: 10px; border-top: 1px solid #e8edeb; color: #66766e; font-size: 10px; font-weight: 700; }
+.language-control select { max-width: 164px; min-height: 30px; padding: 4px 7px; border: 1px solid #d9e1de; border-radius: 8px; outline: none; background: #f8faf9; color: #28372f; font-size: 10px; }
+.language-control select:focus { border-color: #36a991; box-shadow: 0 0 0 2px rgba(0,128,105,.1); }
+.quick-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e8edeb; color: #34434b; }
+.quick-toggle > span:first-child { display: grid; gap: 2px; }
+.quick-toggle b { font-size: 10px; }
+.quick-toggle small { color: #849189; font-size: 9px; font-weight: 400; }
+.quick-toggle kbd { color: #08765f; font-family: ui-monospace, Consolas, monospace; font-weight: 800; }
+.primary { width: 100%; padding: 10px 12px; border: 0; border-radius: 10px; background: #17212b; color: #fff; font-size: 12px; font-weight: 750; cursor: pointer; }
+.primary:hover { background: #2a3a43; }

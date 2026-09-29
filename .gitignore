@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 构建产物：源码包不进版本库，需要时用 npm run build 重新生成
+TransMate-v*-源码.zip
+
+# 临时预览页与截图（temp/preview-ui.cjs 生成）
+temp/preview-ui*.html
+temp/crops/
+temp/relay-worker.mjs
+temp/lint-report.json
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+*.log
+
+# npm
+npm-debug.log*

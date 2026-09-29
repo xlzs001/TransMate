@@ -1,0 +1,553 @@
+#wat-region-time-root.wat-root {
+  --wat-scale: 1;
+  --wat-popover-bg: #ffffff;
+  --wat-text: #111b21;
+  --wat-accent: #008069;
+  --wat-offset-x: 0px;
+  --wat-offset-y: 0px;
+  position: relative;
+  z-index: 2147483000;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-inline: 10px 4px;
+  color: var(--wat-text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  transform: translate(var(--wat-offset-x), var(--wat-offset-y));
+}
+
+#wat-region-time-root[data-position]:not([data-position="header"]):not([data-position="status-line"]) {
+  position: fixed;
+  margin: 0;
+}
+
+#wat-region-time-root[data-position="status-line"] {
+  position: absolute;
+  margin: 0;
+}
+
+#wat-region-time-root[data-position="top-right"] {
+  top: 18px;
+  right: 22px;
+}
+
+#wat-region-time-root[data-position="top-left"] {
+  top: 18px;
+  left: 22px;
+}
+
+#wat-region-time-root[data-position="bottom-right"] {
+  right: 22px;
+  bottom: 22px;
+}
+
+#wat-region-time-root[data-position="bottom-left"] {
+  left: 22px;
+  bottom: 22px;
+}
+
+#wat-region-time-root[data-position="custom"] {
+  touch-action: none;
+  transform: none;
+}
+
+#wat-region-time-root .wat-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(5px * var(--wat-scale));
+  min-height: calc(30px * var(--wat-scale));
+  max-width: calc(220px * var(--wat-scale));
+  box-sizing: border-box;
+  padding: calc(3px * var(--wat-scale)) calc(4px * var(--wat-scale));
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--wat-text);
+  box-shadow: none;
+  font: inherit;
+  font-size: calc(12px * var(--wat-scale));
+  line-height: calc(18px * var(--wat-scale));
+  white-space: nowrap;
+  cursor: pointer;
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+#wat-region-time-root .wat-summary:hover {
+  opacity: .72;
+}
+
+#wat-region-time-root[data-position="status-line"] .wat-summary {
+  min-height: auto;
+  max-width: none;
+  padding: 0;
+  font-size: calc(12px * var(--wat-scale));
+  line-height: calc(16px * var(--wat-scale));
+}
+
+#wat-region-time-root.wat-dragging .wat-summary {
+  cursor: grabbing;
+  transform: scale(1.02);
+  opacity: .76;
+}
+
+#wat-region-time-root[data-position="custom"] .wat-summary {
+  cursor: grab;
+}
+
+#wat-region-time-root .wat-region {
+  max-width: calc(112px * var(--wat-scale));
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#wat-region-time-root .wat-time {
+  color: var(--wat-accent);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+#wat-region-time-root[data-state="unknown"] .wat-time,
+#wat-region-time-root[data-state="unknown"] .wat-region {
+  color: color-mix(in srgb, var(--wat-text) 62%, transparent);
+}
+
+#wat-region-time-root .wat-time-label {
+  color: color-mix(in srgb, var(--wat-text) 48%, transparent);
+}
+
+/* 客户不在工作时段时的小圆点提醒；详细文案走 title 与弹层，避免撑宽摘要条。 */
+#wat-region-time-root .wat-work {
+  flex: none;
+  width: calc(7px * var(--wat-scale));
+  height: calc(7px * var(--wat-scale));
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 calc(2px * var(--wat-scale)) rgba(245, 158, 11, .2);
+  cursor: help;
+}
+
+#wat-region-time-root[data-position="status-line"] .wat-work {
+  width: 6px;
+  height: 6px;
+  box-shadow: none;
+}
+
+/* 客户在线状态灯：只读 WhatsApp 自己显示的状态文案，不额外发请求。
+   在线实心绿点，离线灰点，读不到状态时整个收起（不假装离线）。 */
+#wat-region-time-root .wat-presence {
+  flex: none;
+  width: calc(8px * var(--wat-scale));
+  height: calc(8px * var(--wat-scale));
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--wat-text) 34%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wat-text) 26%, transparent);
+  transition: background 160ms ease;
+  cursor: help;
+}
+
+#wat-region-time-root .wat-presence[data-state="online"] {
+  background: #25d366;
+  box-shadow: 0 0 0 calc(2.5px * var(--wat-scale)) rgba(37, 211, 102, .22);
+}
+
+#wat-region-time-root .wat-presence[data-flash="1"] {
+  animation: wat-presence-flash 900ms ease-out 4;
+}
+
+@keyframes wat-presence-flash {
+  0%, 100% { transform: scale(1); }
+  35% { transform: scale(1.8); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #wat-region-time-root .wat-presence[data-flash="1"] { animation: none; }
+}
+
+#wat-region-time-root[data-position="status-line"] .wat-presence {
+  width: 7px;
+  height: 7px;
+}
+
+#wat-region-time-root .wat-popover {
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  width: var(--wat-popover-width, 320px);
+  max-width: calc(100vw - 20px);
+  max-height: calc(100vh - 24px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--wat-text) 16%, transparent);
+  border-radius: 14px;
+  background: var(--wat-popover-bg);
+  box-shadow: 0 14px 42px rgba(11, 20, 26, 0.22);
+  color: #111b21;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+#wat-region-time-root.wat-open-up .wat-popover,
+#wat-region-time-root[data-position="bottom-left"] .wat-popover,
+#wat-region-time-root[data-position="bottom-right"] .wat-popover {
+  top: auto;
+  bottom: calc(100% + 9px);
+}
+
+#wat-region-time-root.wat-open-right .wat-popover,
+#wat-region-time-root[data-position="top-left"] .wat-popover,
+#wat-region-time-root[data-position="bottom-left"] .wat-popover {
+  right: auto;
+  left: 0;
+}
+
+#wat-region-time-root .wat-popover[hidden],
+#wat-region-time-root [hidden] {
+  display: none !important;
+}
+
+#wat-region-time-root .wat-popover-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+#wat-region-time-root .wat-popover-header > div {
+  min-width: 0;
+}
+
+#wat-region-time-root .wat-popover-header small {
+  display: block;
+  max-width: 230px;
+  margin-top: 2px;
+  overflow: hidden;
+  color: #86938d;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#wat-region-time-root .wat-popover-title {
+  font-size: 15px;
+  font-weight: 750;
+}
+
+#wat-region-time-root .wat-popover-close {
+  display: grid;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: #f0f4f2;
+  color: #667781;
+  font: 20px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#wat-region-time-root .wat-popover-close:hover {
+  background: #e5ece9;
+  color: #111b21;
+}
+
+#wat-region-time-root .wat-detail-row,
+#wat-region-time-root .wat-field {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+#wat-region-time-root .wat-detail-row > span,
+#wat-region-time-root .wat-field > span,
+#wat-region-time-root .wat-note {
+  color: #667781;
+}
+
+#wat-region-time-root .wat-detail-row strong {
+  overflow: hidden;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态 / 沟通时间这两行文案较长要换行，且末尾各带一个快捷开关，所以是"标签 + 值 + 开关"三列。 */
+#wat-region-time-root .wat-work-row,
+#wat-region-time-root .wat-presence-row {
+  grid-template-columns: 78px minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+#wat-region-time-root .wat-work-row .wat-work-hint,
+#wat-region-time-root .wat-presence-row .wat-presence-hint {
+  overflow: visible;
+  white-space: normal;
+  text-overflow: clip;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+#wat-region-time-root .wat-work-row .wat-work-hint {
+  color: #b45309;
+}
+
+#wat-region-time-root .wat-work-row .wat-work-hint[data-state="in"] {
+  color: #15803d;
+}
+
+#wat-region-time-root .wat-presence-row .wat-presence-hint {
+  color: #667781;
+}
+
+#wat-region-time-root .wat-presence-row .wat-presence-hint[data-state="online"] {
+  color: #128c4a;
+  font-weight: 650;
+}
+
+/* 弹层里的快捷开关。注意要盖掉上面那条给文本框/下拉用的 34px 通用 input 样式。 */
+#wat-region-time-root .wat-toggle {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 30px;
+  height: 18px;
+  margin-top: 1px;
+  cursor: pointer;
+}
+
+#wat-region-time-root .wat-toggle input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#wat-region-time-root .wat-toggle input:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+#wat-region-time-root .wat-toggle i {
+  display: block;
+  width: 30px;
+  height: 18px;
+  border-radius: 9px;
+  background: #c7d1d6;
+  transition: background 150ms ease;
+}
+
+#wat-region-time-root .wat-toggle i::after {
+  content: "";
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: 2px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(11, 20, 26, .32);
+  transition: transform 150ms ease;
+}
+
+#wat-region-time-root .wat-toggle input:checked + i {
+  background: #008069;
+}
+
+#wat-region-time-root .wat-toggle input:checked + i::after {
+  transform: translateX(12px);
+}
+
+#wat-region-time-root .wat-toggle input:focus-visible + i {
+  outline: 2px solid color-mix(in srgb, var(--wat-accent) 60%, transparent);
+  outline-offset: 2px;
+}
+
+#wat-region-time-root select,
+#wat-region-time-root input {
+  min-width: 0;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--wat-text) 22%, transparent);
+  border-radius: 7px;
+  background: var(--wat-popover-bg);
+  color: #111b21;
+  font: inherit;
+  outline: none;
+}
+
+#wat-region-time-root select:focus,
+#wat-region-time-root input:focus {
+  border-color: var(--wat-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--wat-accent) 14%, transparent);
+}
+
+#wat-region-time-root input.wat-invalid {
+  border-color: #d93025;
+  outline: 1px solid #d93025;
+}
+
+#wat-region-time-root .wat-profile-hint {
+  display: block;
+  margin: 4px 0 0 86px;
+  color: #86938d;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+#wat-region-time-root .wat-save-phone {
+  width: 100%;
+  margin-top: 11px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--wat-accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+#wat-region-time-root .wat-note {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #edf1ef;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+html[dir="rtl"] #wat-region-time-root .wat-popover {
+  right: auto;
+  left: 0;
+}
+
+@media (max-width: 900px) {
+  #wat-region-time-root[data-position="header"] .wat-region,
+  #wat-region-time-root[data-position="header"] .wat-time-label {
+    display: none;
+  }
+
+  #wat-region-time-root[data-position="header"] .wat-summary {
+    padding-inline: calc(8px * var(--wat-scale));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #wat-region-time-root .wat-summary {
+    transition: none;
+  }
+}
+
+@keyframes tlp-chat-message-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Per-message progress appears beside the original text, before WhatsApp's timestamp. */
+#main .tlp-chat-message-progress[data-tlp-chat-message-progress="1"] {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  box-sizing: border-box;
+  margin-inline: 5px 2px;
+  vertical-align: -1px;
+  border: 1.5px solid rgba(102, 119, 129, .28);
+  border-top-color: #25d366;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: tlp-chat-message-spin .72s linear infinite;
+}
+
+#main .tlp-chat-message-progress[data-state="error"] {
+  border-color: #d93025;
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #main .tlp-chat-message-progress { animation-duration: 1.4s; }
+}
+
+/* Built-in translator is deliberately scoped to WhatsApp's right-hand chat pane. */
+#main .tlp-chat-translation[data-tlp-chat-translation="1"] {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  padding: 1px 0;
+  border: 0;
+  background: transparent;
+  color: var(--tlp-chat-translation-color, #0b57d0);
+  font-family: inherit;
+  font-size: var(--tlp-chat-translation-size, 13px);
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+#main[data-tlp-chat-mode="original"] .tlp-chat-translation[data-tlp-chat-translation="1"] {
+  display: none !important;
+}
+
+#main[data-tlp-chat-mode="translation"] .tlp-chat-source {
+  display: none !important;
+}
+
+#main[data-tlp-chat-style="background"] .tlp-chat-translation[data-tlp-chat-translation="1"] {
+  padding: 4px 6px;
+  border-radius: 5px;
+  background: var(--tlp-chat-translation-bg, #eaf2ff);
+}
+
+#main[data-tlp-chat-style="underline"] .tlp-chat-translation[data-tlp-chat-translation="1"] {
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--tlp-chat-translation-color, #0b57d0) 55%, transparent);
+}
+
+#main[data-tlp-chat-style="dashed"] .tlp-chat-translation[data-tlp-chat-translation="1"] {
+  padding-top: 4px;
+  border-top: 1px dashed color-mix(in srgb, var(--tlp-chat-translation-color, #0b57d0) 55%, transparent);
+}
+
+/* 硬信息校验提示：挂在译文元素内部，所以用 block 单独占一行。 */
+#main .tlp-chat-translation-warning {
+  display: block;
+  margin-top: 3px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: rgba(180, 83, 9, .12);
+  border-left: 2px solid #b45309;
+  color: #92400e;
+  font-size: 11.5px;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+@media (prefers-color-scheme: dark) {
+  #main .tlp-chat-translation-warning {
+    background: rgba(251, 191, 36, .16);
+    border-left-color: #fbbf24;
+    color: #fcd34d;
+  }
+}
+
+#main.tlp-hide-immersive [class~="immersive-translate-target-inner"],
+#main.tlp-hide-immersive [class*="immersive-translate-target-translation"] {
+  display: none !important;
+}

@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "TransMate - 外贸翻译与客户时区",
+  "version": "3.9.8",
+  "description": "外贸商务翻译、WhatsApp 聊天窗口翻译，以及客户号码归属地区与当地时间。作者：Mark。",
+  "author": "Mark",
+  "permissions": [
+    "storage",
+    "clipboardWrite",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://translate.googleapis.com/*",
+    "https://translate.google.com/*",
+    "https://clients5.google.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://web.whatsapp.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://api.deepseek.com/*",
+    "https://api.groq.com/*",
+    "https://openrouter.ai/*",
+    "https://dashscope.aliyuncs.com/*",
+    "https://open.bigmodel.cn/*",
+    "https://api.siliconflow.cn/*",
+    "https://api-free.deepl.com/*",
+    "https://api.deepl.com/*",
+    "https://*.openai.azure.com/*",
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["timezone.js"],
+      "css": ["timezone.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "TransMate",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "short_name": "TransMate",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

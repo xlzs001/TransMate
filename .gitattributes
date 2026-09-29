@@ -1,0 +1,13 @@
+# 换行符统一：仓库里一律 LF，检出时按各人系统还原。
+# 团队里 Windows / macOS 混用时，不加这个文件会看到"整文件都被改了"的假 diff。
+* text=auto
+
+# 二进制文件不要做换行符转换，否则图标会被改坏
+*.png binary
+*.ico binary
+*.jpg binary
+*.zip binary
+
+# 版本说明和文档按文本处理，但保留原样
+*.txt text
+*.md text
