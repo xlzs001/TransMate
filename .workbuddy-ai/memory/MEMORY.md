@@ -29,7 +29,10 @@ C:\Users\hengchu\Desktop\Mark\Mark\TransMate
 ## 常用命令
 
 ```bash
-# 回归测试（36 项）
+# 全部门禁（8 道，约 2.4 秒）—— 提交前必跑
+npm run check
+
+# 回归测试（47 项）
 node temp/regression-checks.cjs
 
 # 弹层 UI 视觉校验（生成静态预览页，再用 Chrome 截图看效果）
@@ -42,6 +45,12 @@ node temp/review-checks.cjs
 
 # 中转 Worker 冒烟测试（29 项）
 node temp/relay-smoke.mjs
+
+# 质量预算（超标函数名单，兼重构待办清单）
+node temp/quality-budget.cjs
+
+# 变异测试（故意改坏，确认回归测试真的会红）
+node temp/mutation-test.cjs
 
 # 打包源码（版本号自动从 manifest 读）
 python temp/build-zip.py
@@ -156,24 +165,34 @@ M5（busy 静默丢弃），`review-checks.cjs` 的遗留项已清零。v3.9.7 �
 ## 工程质量设施（v3.9.9 建立，2026-09-29）
 
 **真实工作目录是 `C:/Users/hengchu/Desktop/Mark/Mark/TransMate/`**（不是 `TransMatev3.7.3`，那是 v3.9.0 旧副本；
-同级还有 `TransMate-v3.9.5/3.9.7/3.9.8-源码/` 三个目录和 4 个历史 zip，用户尚未决定是否清理）。
+同级还有 `TransMate-v3.9.5/3.9.7/3.9.8-源码/` 三个目录和 5 个历史 zip，用户尚未决定是否清理）。
 
 ### 提交前必跑
 
 ```bash
-npm run check      # 6 道门禁，约 1.3 秒
+npm run check      # 8 道门禁，约 2.4 秒
 npm run metrics    # AST 级质量数据
 python temp/build-zip.py   # 打发布包（版本号自动取 manifest.json）
 ```
 
-### 6 道门禁（`temp/run-checks.cjs` 统一入口）
+### 8 道门禁（`temp/run-checks.cjs` 统一入口）
 
 1. ESLint（`eslint.config.mjs`，ESLint 9 flat config）
 2. 默认值一致性（`temp/defaults-consistency.cjs`）
-3. 回归测试 40 项（`temp/regression-checks.cjs`）
+3. 回归测试 47 项（`temp/regression-checks.cjs`）
 4. 审查项 8 项（`temp/review-checks.cjs`）
 5. relay 冒烟 29 项（`temp/relay-smoke.mjs`）
 6. 空 catch 有说明（复用 `quality-metrics.cjs` 的 `analyzeAll()`）
+7. **质量预算**（`temp/quality-budget.cjs`）：R1 名单外超标拦下 / R2 名单内变差拦下 /
+   **R3 已达标或不存在 → 要求删条目**。上限 复杂度 ≤15、长度 ≤80。
+   **R3 是关键**：没有它名单只会越来越长，最后变成"什么都可以"。
+   名单（`ALLOWED`）同时就是**重构待办清单**，改好一个就来删一行。
+8. **变异测试**（`temp/mutation-test.cjs`）：故意改坏代码，确认回归测试真的会红。
+   10 个变异点，约 0.5 秒。判定标准只有一条 —— **改坏后回归测试必须变红**。
+   不要拿"错误信息里有没有某关键字"当判定（断言输出里通常不含源码字面量，
+   会把"抓住了"误判成"漏掉"）。**锚点失效也算失败**，否则锚点会腐烂成空转。
+   实现靠 `regression-checks.cjs` 暴露的 `setSourceOverrides()` 做**进程内**源码替换 ——
+   不起子进程、不用 Python。
 
 **运行器是进程内编排、不起子进程**。原因：本机沙箱禁止创建子进程
 （`spawnSync`/`execSync`/`execFileSync` 全部 EBUSY，连 `node --version` 都起不来）。
@@ -197,15 +216,37 @@ ESLint 走官方 Node API。**不要改回 spawn 版本**，否则本机无法�
   和**顶层 IIFE 外壳**（`findTopLevelWrappers()`），否则统计会被带偏。
 - **`isTrivial`（长度 ≤2 且复杂度 ≤1）不计入长度/复杂度分布**。
   表驱动重构会引入大量单行取值器，函数总数上涨是好事不是退步。
+- **断言要描述不变量，不要数调用次数**（本轮踩到的坑，已写进手册 3.5）。
+  原来的 `assert.equal((background.match(/TLP_VERIFY\.verifyTranslation\(/g)||[]).length, 7)`
+  两头都不对：正确重构（把三处内联校验集中到 `withWarnings()`）后误报；
+  新增出口**忘记**加校验时又不报警。改成遍历所有 `return {...targetLanguage:/warnings:}`
+  的出口行、断言每行都含 `warnings:`。
+  **判断标准：这个断言在"代码写得不一样但行为正确"时会不会失败？**
+- **本项目所有源文件是 CRLF，不是 LF。** `.gitattributes` 是 `* text=auto`，
+  仓库内统一 LF、检出还原 CRLF，所以 git 提示 "LF will be replaced by CRLF" 是正常的。
+  Python 改文件必须 `io.open(..., newline='')`；断言里 `split('\n')` 后要 `.trim()` 去掉 `\r`。
+- **表驱动重构的边界：只有当分支之间"只差数据"时才合并。**
+  一旦要往表里加 `if (kind === 'xxx')` 特判，就说明它不属于这张表。
+  `verify.js` 里术语/柜型/型号进了 `BIDIRECTIONAL_FACTS`，而数字（中文数字折算）
+  和货币（符号多义展开）保持独立函数。**强行统一比重复更糟** ——
+  重复至少能一眼看出两处不一样，硬凑的抽象会把差异藏进 `if` 里。
 - 版本号唯一来源是 `manifest.json`；`options.html` 和 `安装说明.txt` 各有一处 `vX.Y.Z` 必须跟上（有测试守）。
 - CI：`.github/workflows/quality-gate.yml`（`npm ci` + `npm run check` + 输出度量）。
 - git 已初始化，`.gitattributes` 用 `* text=auto`（Windows/Mac 混用避免假 diff）。
 
-### 质量基线（v3.9.9，供下次对比）
+### 质量基线（v3.9.9 复测，供下次对比）
 
-自有代码 4100 行（排除 vendored 3230）｜函数 374（103 个单行取值器，271 计入统计）
-函数长度 最长 115 / P90 32 / 中位数 8｜复杂度 最高 32 / P90 12 / 中位数 3
+自有代码 4214 行（排除 vendored 3230）｜函数 406（107 个单行取值器，299 计入统计）
+函数长度 最长 97 / P90 30 / 中位数 8｜复杂度 最高 24 / P90 11 / 中位数 3
 空 catch 12 处（全部有说明）｜重复代码 11 组（全是默认值表，已被门禁守）
 
-**最该动但还没动的三个**：`timezone.js:4902 update`（复杂度 32 + 94 行）、
-`popup.js:76 render`（复杂度 31，文件仅 135 行）、`background.js:824 translateChatBatch`（115 行）。
+**注意 `popup.js` 135→158 行、`verify.js` 211→247 行 —— 行数是涨的**，
+因为拆函数本身要写更多行。**看分布，不看总量。**
+
+已拆完（初版基线里排最前的四个）：`popup.js:render`（31→12）、
+`timezone.js:update`（32→ 掉出榜）、`background.js:translateChatBatch`（115 行/22→47 行/8）、
+`verify.js` 两个函数（17/24 → 3/1）。
+
+**质量预算名单还剩 8 条**，高优先：`options.js:loadSettings`（62/24）、
+`timezone.js:pumpChatTranslationQueue`（56/24）、`timezone.js:translateVisibleChat`（43/24）。
+有意接受（长但不绕）：`background.js:callProvider`（89 行/13）、`timezone.js:createRoot`（97 行/4）。
