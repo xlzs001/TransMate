@@ -4,7 +4,16 @@ const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
-const source = file => fs.readFileSync(path.join(root, file), 'utf8');
+
+// 源码覆盖钩子：变异测试要在进程内把某个文件换成"故意改坏"的版本，
+// 然后看回归测试会不会变红。默认关闭，正常运行时读的就是磁盘上的文件。
+let sourceOverrides = null;
+const source = file => {
+  if (sourceOverrides && Object.hasOwn(sourceOverrides, file)) return sourceOverrides[file];
+  return fs.readFileSync(path.join(root, file), 'utf8');
+};
+/** 传 null 恢复成读磁盘。只给 temp/mutation-test.cjs 用。 */
+function setSourceOverrides(overrides) { sourceOverrides = overrides; }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 function fakeElement(tag = 'div') {
   return {
@@ -689,10 +698,26 @@ async function run() {
     assert.deepEqual(plain([...V.extractHardFacts('40HC').containers]), ['40HQ']);
     assert.deepEqual(plain([...V.extractHardFacts('40 尺高柜').containers]), ['40HQ']);
     assert.deepEqual(plain(V.verifyTranslation('40HC', '40HQ')), []);
+    // 归一之后仍然要能发现真的被改写了：40HQ 写成 40GP 是事故。
+    const swapped = V.verifyTranslation('40HQ', '40GP');
+    assert.ok(plain(swapped).some(item => item.kind === 'container' && item.token === '40HQ'));
 
     // 货币：RMB 归到 CNY，中文"美元"与代码 USD 等价。
     assert.deepEqual(plain([...V.extractHardFacts('报价 RMB 5000').currencies]), ['CNY']);
     assert.deepEqual(plain([...V.extractHardFacts('12.50 美元').currencies]), ['USD']);
+
+    // 符号有多义，只要两边有一个共同候选就算一致：$ 与 USD 不该报不一致。
+    // 两个方向都要测：符号在原文侧时会展开成 7 个候选，必须"任一命中"而不是"全部命中"。
+    assert.deepEqual(plain(V.verifyTranslation('USD 100', '$100')), []);
+    assert.deepEqual(plain(V.verifyTranslation('$100', 'USD 100')), []);
+    // 但两边彻底对不上时（USD -> EUR）必须报，这是最容易漏掉的一条。
+    const currencySwap = V.verifyTranslation('USD 100', 'EUR 100');
+    assert.deepEqual(plain(currencySwap).map(item => item.kind), ['currency']);
+    // 译文里货币单位整个消失，也要报。
+    const currencyLost = V.verifyTranslation('USD 100', '100');
+    assert.deepEqual(plain(currencyLost).map(item => item.kind), ['currency']);
+    // 原文没有货币单位时不该凭空报一条。
+    assert.deepEqual(plain(V.verifyTranslation('100 pcs', '100 件')), []);
 
     // USD12 是"金额 + 数字"，不是型号；真实型号要认得出来。
     assert.deepEqual(plain([...V.extractHardFacts('USD12').models]), []);
@@ -738,6 +763,15 @@ async function run() {
     // 校验绝不能拖垮翻译本身。
     assert.deepEqual(plain(V.verifyTranslation('', 'x')), []);
     assert.deepEqual(V.verifyTranslation('FOB 1 2 3 4 5 6 7 8 9', 'nothing').length <= 6, true);
+
+    // 超过 6 条要截断，而截断是"按顺序砍尾巴"，所以顺序本身是有意义的：
+    // 数字与型号最容易出事故，必须排在货币前面，否则一屏 6 条里可能看不到它们。
+    // 注意 HR-2400 里的 2400 会被同时算作"数字"和"型号"的一部分 —— 这是刻意的：
+    // 数字与型号是两套独立检查，型号变了要报型号，数字变了要报数字，互不代替。
+    const kinds = plain(V.verifyTranslation('Model HR-2400 qty 500 USD', 'x')).map(item => item.kind);
+    assert.equal(kinds[0], 'number', '数字要排在最前面');
+    assert.equal(kinds[kinds.length - 1], 'currency', '货币排在最后');
+    assert.ok(kinds.includes('model'), '型号被整段丢掉时也要报出来');
 
     // 每个翻译出口都必须真的调用校验。
     const background = source('background.js');
@@ -1106,7 +1140,7 @@ async function run() {
   return { passed: passed.length + 1, checks: [...passed, 'versions, HTML ids and polish removal are consistent'] };
 }
 
-module.exports = { run };
+module.exports = { run, setSourceOverrides };
 
 if (require.main === module) {
   run()

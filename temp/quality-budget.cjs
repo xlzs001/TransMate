@@ -36,10 +36,6 @@ const ALLOWED = new Map([
     length: 56, complexity: 24,
     plan: '按「取待翻译 / 请求 / 回填」拆三段'
   }],
-  ['verify.js:compareHardFacts', {
-    length: 53, complexity: 24,
-    plan: '每种比对类型（数字 / 货币 / 型号 / 柜型 / 贸易术语）各一个函数'
-  }],
   ['timezone.js:translateVisibleChat', {
     length: 43, complexity: 24,
     plan: '按「挑选待翻译节点 / 翻译 / 回填」拆三段'
@@ -51,10 +47,6 @@ const ALLOWED = new Map([
   ['timezone.js:getRecentIncomingMessages', {
     length: 45, complexity: 22,
     plan: '按「取候选节点 / 过滤 / 截断」拆三段'
-  }],
-  ['verify.js:extractHardFacts', {
-    length: 53, complexity: 17,
-    plan: '每种事实类型（数字 / 货币 / 型号 / 柜型 / 术语）各一个提取函数'
   }],
   ['timezone.js:findStatusAnchorRect', {
     length: 44, complexity: 16,

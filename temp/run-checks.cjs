@@ -117,6 +117,19 @@ const GATES = [
         detail: result.problems.map(item => '- ' + item).join('\n')
       };
     }
+  },
+  {
+    name: '变异测试',
+    guards: '测试变成摆设 —— 代码改坏了，回归测试却还是绿的',
+    async run() {
+      const { run: check } = require('./mutation-test.cjs');
+      const result = await check();
+      return {
+        ok: result.ok,
+        summary: `${result.caught} / ${result.total} 个变异被抓住`,
+        detail: result.problems.length ? result.problems.map(item => '- ' + item).join('\n') : result.lines.join('\n')
+      };
+    }
   }
 ];
 

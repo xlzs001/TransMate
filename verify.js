@@ -10,6 +10,9 @@
 //
 // 误报与漏报的取舍：这里的取向是"宁可多提醒一次，也不要漏掉一次改写"。
 // 所以中文容器写法、货币的中文说法与符号都做了归一，尽量不因为换了写法就误报。
+//
+// 结构：抽取（extract）与比对（compare）两段，各自按"事实类型"拆成独立函数。
+// 新增一类硬信息，两边各加一个函数、各往一张表里加一行即可。
 // ---------------------------------------------------------------------------
 
 (function () {
@@ -86,6 +89,16 @@
   const CN_SMALL_UNITS = { "十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000 };
   const CN_BIG_UNITS = { "万": 1e4, "亿": 1e8 };
 
+  // 只认规范千分位分组（1,200 / 1 200 / 12,345,678）或普通数字。
+  // 不能写成 \d[\d, ]*：那样 "HR-2400, 20GP" 会被读成一个数 240020。
+  const NUMBER_PATTERN = /\d{1,3}(?:[,\u00a0 ]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g;
+  const CURRENCY_CODE_PATTERN = /(?<![A-Z])([A-Z]{3})(?![A-Z])/g;
+  // 长词优先：否则"新元"会先被"元"匹配走，记成 CNY 而不是 SGD。
+  const CURRENCY_WORD_PATTERN = new RegExp(
+    Object.keys(CURRENCY_WORDS).sort((a, b) => b.length - a.length).join("|"),
+    "g"
+  );
+
   /** 解析一段连续的中文数字（"六" → 6、"二十三" → 23、"三万" → 30000）。 */
   function parseChineseNumber(run) {
     let total = 0;
@@ -148,6 +161,61 @@
     return value;
   }
 
+  // -------------------------------------------------------------------------
+  // 抽取
+  //
+  // 每类事实一个函数，签名统一 (source, upper, facts)：
+  // source 是原文，upper 是原文大写（避免每个函数各转一次），facts 是累加目标。
+  // 用不到 source 或 upper 的函数保持同样的签名，是为了能放进 FACT_COLLECTORS
+  // 里统一驱动 —— 加一类事实只需要加一个函数和一行表项。
+  // -------------------------------------------------------------------------
+
+  function collectNumbers(source, upper, facts) {
+    for (const match of source.matchAll(NUMBER_PATTERN)) {
+      const value = normalizeNumber(match[0]);
+      if (value) facts.numbers.add(value);
+    }
+  }
+
+  function collectIncoterms(source, upper, facts) {
+    for (const match of upper.matchAll(INCOTERM_PATTERN)) facts.incoterms.add(match[1]);
+  }
+
+  function collectCurrencies(source, upper, facts) {
+    // 中文说法：三千美元 里的"美元"。
+    for (const match of source.matchAll(CURRENCY_WORD_PATTERN)) {
+      facts.currencies.add(CURRENCY_WORDS[match[0]]);
+    }
+    // 符号：$ 有多义，命中就把所有候选都记上，与另一侧有一个相同即算一致。
+    for (const [symbol, codes] of Object.entries(CURRENCY_SYMBOLS)) {
+      if (source.includes(symbol)) codes.forEach((code) => facts.currencies.add(code));
+    }
+    // 三字母代码：RMB 归一到 CNY。
+    for (const match of upper.matchAll(CURRENCY_CODE_PATTERN)) {
+      if (!CURRENCY_CODE_SET.has(match[1])) continue;
+      facts.currencies.add(match[1] === "RMB" ? "CNY" : match[1]);
+    }
+  }
+
+  function collectContainers(source, upper, facts) {
+    for (const match of upper.matchAll(CONTAINER_PATTERN)) {
+      const type = match[2].toUpperCase();
+      facts.containers.add(`${match[1]}${type === "HC" ? "HQ" : type}`);
+    }
+    for (const match of source.matchAll(CONTAINER_CN_PATTERN)) {
+      facts.containers.add(`${match[1]}${CONTAINER_CN_TYPES[match[2]] || "GP"}`);
+    }
+  }
+
+  function collectModels(source, upper, facts) {
+    for (const match of upper.matchAll(MODEL_PATTERN)) {
+      if (NON_MODEL_PREFIXES.has(match[1])) continue;
+      facts.models.add(`${match[1]}${match[2]}${match[3]}`);
+    }
+  }
+
+  const FACT_COLLECTORS = [collectNumbers, collectIncoterms, collectCurrencies, collectContainers, collectModels];
+
   function extractHardFacts(text) {
     const source = String(text || "");
     const upper = source.toUpperCase();
@@ -162,47 +230,91 @@
       hasChineseNumerals: CHINESE_NUMERALS.test(source)
     };
 
-    // 只认规范千分位分组（1,200 / 1 200 / 12,345,678）或普通数字。
-    // 不能写成 \d[\d, ]*：那样 "HR-2400, 20GP" 会被读成一个数 240020。
-    for (const match of source.matchAll(/\d{1,3}(?:[,\u00a0 ]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)) {
-      const value = normalizeNumber(match[0]);
-      if (value) facts.numbers.add(value);
-    }
-
-    for (const match of upper.matchAll(INCOTERM_PATTERN)) facts.incoterms.add(match[1]);
-
-    const currencyWordPattern = new RegExp(
-      Object.keys(CURRENCY_WORDS).sort((a, b) => b.length - a.length).join("|"),
-      "g"
-    );
-    for (const match of source.matchAll(currencyWordPattern)) {
-      facts.currencies.add(CURRENCY_WORDS[match[0]]);
-    }
-    for (const [symbol, codes] of Object.entries(CURRENCY_SYMBOLS)) {
-      if (source.includes(symbol)) codes.forEach((code) => facts.currencies.add(code));
-    }
-    for (const match of upper.matchAll(/(?<![A-Z])([A-Z]{3})(?![A-Z])/g)) {
-      if (!CURRENCY_CODE_SET.has(match[1])) continue;
-      facts.currencies.add(match[1] === "RMB" ? "CNY" : match[1]);
-    }
-
-    for (const match of upper.matchAll(CONTAINER_PATTERN)) {
-      const type = match[2].toUpperCase();
-      facts.containers.add(`${match[1]}${type === "HC" ? "HQ" : type}`);
-    }
-    for (const match of source.matchAll(CONTAINER_CN_PATTERN)) {
-      facts.containers.add(`${match[1]}${CONTAINER_CN_TYPES[match[2]] || "GP"}`);
-    }
-
-    for (const match of upper.matchAll(MODEL_PATTERN)) {
-      if (NON_MODEL_PREFIXES.has(match[1])) continue;
-      facts.models.add(`${match[1]}${match[2]}${match[3]}`);
-    }
-
+    for (const collect of FACT_COLLECTORS) collect(source, upper, facts);
     return facts;
   }
 
+  // -------------------------------------------------------------------------
+  // 比对
+  // -------------------------------------------------------------------------
+
   const join = (set) => [...set].join(" / ");
+
+  /**
+   * 数字：译文允许把数字写成中文，所以"丢失"方向要先把中文数字折算进来。
+   * "多出"方向反过来只看阿拉伯数字 —— 见 chineseNumeralsAsDigits 的说明。
+   */
+  function compareNumbers(source, target, translatedText, push) {
+    const translatedNumbers = new Set(target.numbers);
+    for (const value of chineseNumeralsAsDigits(translatedText)) translatedNumbers.add(value);
+
+    for (const value of source.numbers) {
+      if (!translatedNumbers.has(value)) push("number", value, `原文的数字 ${value} 没有出现在译文里`);
+    }
+    if (source.hasChineseNumerals) return;
+    for (const value of target.numbers) {
+      if (!source.numbers.has(value)) push("number", value, `译文出现了原文没有的数字 ${value}`);
+    }
+  }
+
+  /**
+   * 需要"双向比对"的三类事实。每类只描述三件事：取哪一组、报什么 kind、
+   * 怎么判断"它在文本里"。之前这三类各手写了两段一模一样的循环，
+   * 改一次措辞要同步改六处，漏一处就是文案不一致。
+   */
+  const BIDIRECTIONAL_FACTS = [
+    {
+      field: "incoterms",
+      kind: "incoterm",
+      label: "贸易术语",
+      // 术语可能被意译成中文（EXW → 出厂价），所以必须回到文本里找，不能只看抽取结果。
+      appearsIn: (facts, text, token) => incotermAppearsIn(text, token)
+    },
+    {
+      field: "containers",
+      kind: "container",
+      label: "柜型",
+      // 抽取时已把 HC 归一到 HQ、中文柜型归一到 GP，所以直接比集合就够了。
+      appearsIn: (facts, text, token) => facts.containers.has(token)
+    },
+    {
+      field: "models",
+      kind: "model",
+      label: "型号",
+      appearsIn: (facts, text, token) => facts.models.has(token)
+    }
+  ];
+
+  function compareBidirectionalFacts(source, target, sourceText, translatedText, push) {
+    for (const fact of BIDIRECTIONAL_FACTS) {
+      for (const token of source[fact.field]) {
+        if (!fact.appearsIn(target, translatedText, token)) {
+          push(fact.kind, token, `${fact.label} ${token} 在译文里丢失或被改写`);
+        }
+      }
+      for (const token of target[fact.field]) {
+        if (!fact.appearsIn(source, sourceText, token)) {
+          push(fact.kind, token, `译文出现了原文没有的${fact.label} ${token}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * 货币不按"逐个比对"处理：符号与中文说法都会展开成一组候选，
+   * 只要两边有一个共同代码就算一致，全都对不上才提示"可能不一致"。
+   */
+  function compareCurrencies(source, target, push) {
+    if (!source.currencies.size) return;
+    if (!target.currencies.size) {
+      push("currency", join(source.currencies), `译文里没有出现货币单位（原文为 ${join(source.currencies)}）`);
+      return;
+    }
+    const shared = [...source.currencies].some((code) => target.currencies.has(code));
+    if (!shared) {
+      push("currency", join(source.currencies), `货币单位可能不一致：原文 ${join(source.currencies)}，译文 ${join(target.currencies)}`);
+    }
+  }
 
   function compareHardFacts(sourceText, translatedText) {
     const source = extractHardFacts(sourceText);
@@ -210,49 +322,11 @@
     const warnings = [];
     const push = (kind, token, message) => warnings.push({ kind, token, message });
 
-    // 译文允许把数字写成中文，所以"丢失"方向要先把中文数字折算进来。
-    const translatedNumbers = new Set(target.numbers);
-    for (const value of chineseNumeralsAsDigits(translatedText)) translatedNumbers.add(value);
-
-    for (const value of source.numbers) {
-      if (!translatedNumbers.has(value)) push("number", value, `原文的数字 ${value} 没有出现在译文里`);
-    }
-    if (!source.hasChineseNumerals) {
-      for (const value of target.numbers) {
-        if (!source.numbers.has(value)) push("number", value, `译文出现了原文没有的数字 ${value}`);
-      }
-    }
-
-    for (const term of source.incoterms) {
-      if (!incotermAppearsIn(translatedText, term)) push("incoterm", term, `贸易术语 ${term} 在译文里丢失或被改写`);
-    }
-    for (const term of target.incoterms) {
-      if (!incotermAppearsIn(sourceText, term)) push("incoterm", term, `译文出现了原文没有的贸易术语 ${term}`);
-    }
-
-    for (const size of source.containers) {
-      if (!target.containers.has(size)) push("container", size, `柜型 ${size} 在译文里丢失或被改写`);
-    }
-    for (const size of target.containers) {
-      if (!source.containers.has(size)) push("container", size, `译文出现了原文没有的柜型 ${size}`);
-    }
-
-    for (const model of source.models) {
-      if (!target.models.has(model)) push("model", model, `型号 ${model} 在译文里丢失或被改写`);
-    }
-    for (const model of target.models) {
-      if (!source.models.has(model)) push("model", model, `译文出现了原文没有的型号 ${model}`);
-    }
-
-    if (source.currencies.size && !target.currencies.size) {
-      push("currency", join(source.currencies), `译文里没有出现货币单位（原文为 ${join(source.currencies)}）`);
-    } else if (
-      source.currencies.size
-      && target.currencies.size
-      && ![...source.currencies].some((code) => target.currencies.has(code))
-    ) {
-      push("currency", join(source.currencies), `货币单位可能不一致：原文 ${join(source.currencies)}，译文 ${join(target.currencies)}`);
-    }
+    // 顺序决定截断时谁先被留下：数字 -> 术语/柜型/型号 -> 货币。
+    // 数字与型号是最容易出事故的，所以排在最前面。
+    compareNumbers(source, target, translatedText, push);
+    compareBidirectionalFacts(source, target, sourceText, translatedText, push);
+    compareCurrencies(source, target, push);
 
     // 单条消息最多报 6 条，避免长文本刷屏把真正重要的一条淹掉。
     return warnings.slice(0, 6);
