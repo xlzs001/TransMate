@@ -160,31 +160,18 @@ function verifyApi() {
   vm.runInContext(source('verify.js'), sandbox, { filename: 'verify.js' });
   return sandbox.TLP_VERIFY;
 }
-// timezone.js 是个巨大的内容脚本，没法整体跑。这里只把"客户沟通时间建议"那一段
-// 纯计算代码切出来单独执行，DOM 部分用最小夹具代替。
-function workHintModule(config) {
-  const code = source('timezone.js');
-  const start = code.indexOf('\n  // 客户沟通时间建议\n');
-  const end = code.indexOf('function createRoot()', start);
-  assert.ok(start > -1 && end > start, 'timezone.js 里应存在客户沟通时间建议模块');
-  const sandbox = {
-    console, activeConfig: config, Intl, Date, Math, Number, String, Object, Array, Map, Set
-  };
-  vm.createContext(sandbox);
-  vm.runInContext(
-    code.slice(start, end)
-      + '\nglobalThis.workApi = { WEEKDAY_INDEX, workHourRange, minutesUntilWorkWindow, formatWorkGap, describeContactWorkHours, renderWorkHint };',
-    sandbox,
-    { filename: 'timezone-work.js' }
-  );
-  return sandbox;
-}
 // timezone.js 里"客户在线状态指示灯"那一段同样是纯逻辑，单独切出来执行。
 function presenceModule(config) {
   const code = source('timezone.js');
-  const start = code.indexOf('\n  // 客户在线状态指示灯\n');
-  const end = code.indexOf('\n  // 客户沟通时间建议\n', start);
+  // 按"整行相等"定位，不要用 indexOf 找注释文本：
+  // 默认值表（DISPLAY_DEFAULTS）里也有一行同名注释，indexOf 会先命中它，
+  // 于是切片从一个错误的起点开始（真正的模块函数一个都切不进来）。
+  // 顺带也就摆脱了对某个具体换行符的依赖。
+  const lines = code.split('\n');
+  const start = lines.findIndex(line => line.trim() === '// 客户在线状态指示灯');
+  const end = lines.findIndex((line, index) => index > start && line.trim().startsWith('function createRoot()'));
   assert.ok(start > -1 && end > start, 'timezone.js 里应存在客户在线状态指示灯模块');
+  const snippet = lines.slice(start, end).join('\n');
   const sandbox = {
     console, activeConfig: config, activeHeader: null, ROOT_ID: 'wat-region-time-root',
     cleanText: value => String(value || '').replace(/\s+/g, ' ').trim(),
@@ -194,8 +181,8 @@ function presenceModule(config) {
   };
   vm.createContext(sandbox);
   vm.runInContext(
-    code.slice(start, end)
-      + '\nglobalThis.presenceApi = { isOnlinePresence, getPresenceElement, detectPresence, renderPresence };',
+    snippet
+      + '\nglobalThis.presenceApi = { isOnlinePresence, looksLikePresenceText, isIconLike, getPresenceElement, detectPresence, renderPresence };',
     sandbox,
     { filename: 'timezone-presence.js' }
   );
@@ -273,15 +260,6 @@ function fakePresenceRoot() {
 // vm 里造出来的数组/对象原型与宿主机不同，deepStrictEqual 会因为原型不一致而失败。
 // 统一走一次 JSON 往返，拿到宿主机的普通对象再断言。
 const plain = value => JSON.parse(JSON.stringify(value));
-function fakeWorkRoot() {
-  const marker = { hidden: false, title: '', removeAttribute(name) { if (name === 'title') this.title = ''; } };
-  const detail = { textContent: '', dataset: {} };
-  return {
-    marker,
-    detail,
-    root: { dataset: {}, querySelector: sel => (sel === '.wat-work' ? marker : sel === '.wat-work-hint' ? detail : null) }
-  };
-}
 async function run() {
   const passed = [];
   async function test(name, fn) { await fn(); passed.push(name); }
@@ -799,76 +777,6 @@ async function run() {
     assert.match(source('timezone.js'), /tlp-chat-translation-warning/, '聊天译文里要内嵌提示');
   });
 
-  await test('customer work hours drive the contact-time hint', async () => {
-    const sandbox = workHintModule({ watContactWorkHint: true, watContactWorkStart: 9, watContactWorkEnd: 18, watContactWorkWeekends: false });
-    const W = sandbox.workApi;
-
-    assert.deepEqual(plain(W.workHourRange({})), { start: 9, end: 18, startMinutes: 540, endMinutes: 1080 });
-    // 上班时间必须早于下班时间：填反了也要自愈，不能出现空时段或负时长。
-    assert.deepEqual(plain(W.workHourRange({ watContactWorkStart: 20, watContactWorkEnd: 5 })), { start: 20, end: 21, startMinutes: 1200, endMinutes: 1260 });
-    assert.deepEqual(plain(W.workHourRange({ watContactWorkStart: 99, watContactWorkEnd: 99 })), { start: 23, end: 24, startMinutes: 1380, endMinutes: 1440 });
-
-    const gap = (weekday, hour, weekend = false) => W.minutesUntilWorkWindow(weekday, hour * 60, 540, 1080, weekend);
-    assert.equal(gap(1, 8), 60, '周一 08:00 距上班 1 小时');
-    assert.equal(gap(1, 12), 0, '周一 12:00 在工作时段内');
-    assert.equal(gap(1, 20), 780, '周一 20:00 要等到周二 09:00');
-    // 跨周末：周五 20:00 → 周一 09:00 = 4h + 24h + 24h + 9h。
-    assert.equal(gap(5, 20), 3660, '周五下班后要跳到下周一');
-    assert.equal(gap(6, 12), 2700, '周六默认不算工作日');
-    assert.equal(gap(6, 12, true), 0, '勾选周末后周六 12:00 也算工作时段');
-
-    assert.equal(W.formatWorkGap(0), '0 分');
-    assert.equal(W.formatWorkGap(45), '45 分');
-    assert.equal(W.formatWorkGap(60), '1 小时');
-    assert.equal(W.formatWorkGap(90), '1 小时 30 分');
-
-    const info = plain(W.describeContactWorkHours('Asia/Tokyo', {}));
-    assert.match(info.text, /^客户当地时间 \d{2}:\d{2}/);
-    assert.equal(info.range, '09:00–18:00');
-    assert.equal(info.inWindow, info.text.includes('处于工作时段'));
-
-    // 关掉开关 → 不显示圆点，弹层写"已关闭"；没有时区 → 两个位置都清空。
-    let fixture = fakeWorkRoot();
-    sandbox.activeConfig = { watContactWorkHint: false };
-    W.renderWorkHint(fixture.root, { timezone: 'Asia/Tokyo' });
-    assert.equal(fixture.marker.hidden, true);
-    assert.equal(fixture.detail.textContent, '已关闭');
-    assert.equal(fixture.root.dataset.work, undefined);
-
-    fixture = fakeWorkRoot();
-    sandbox.activeConfig = { watContactWorkHint: true };
-    W.renderWorkHint(fixture.root, { timezone: null });
-    assert.equal(fixture.marker.hidden, true);
-    assert.equal(fixture.detail.textContent, '—');
-
-    fixture = fakeWorkRoot();
-    W.renderWorkHint(fixture.root, { timezone: 'Asia/Tokyo' });
-    assert.equal(fixture.marker.hidden, fixture.root.dataset.work === 'in', '只有不在工作时段才亮圆点');
-    assert.equal(fixture.detail.dataset.state, fixture.root.dataset.work);
-    assert.match(fixture.detail.textContent, /^客户当地时间 \d{2}:\d{2}/);
-    assert.equal(fixture.marker.title, fixture.detail.textContent, '悬停提示应与弹层文案一致');
-
-    // 计算好还不够，必须真的接到渲染路径上，否则就是死代码。
-    const timezoneCode = source('timezone.js');
-    assert.match(timezoneCode, /\.wat-time"\)\.textContent = formatLocalTime\(state\.timezone\);\s*renderWorkHint\(root, state\);/, 'renderKnown 要调用 renderWorkHint');
-    assert.match(timezoneCode, /\.wat-time"\)\.textContent = "\\u70B9\\u51FB\\u8BBE\\u7F6E";\s*renderWorkHint\(root, \{ timezone: null \}\);/, 'renderUnknown 要清空提示');
-    assert.match(timezoneCode, /\.wat-time"\)\.textContent = formatLocalTime\(activeState\.timezone\);\s*renderWorkHint\(root, activeState\);/, '定时刷新要同步更新提示');
-    assert.match(timezoneCode, /<span class="wat-work" hidden><\/span>/, '摘要条里要有圆点锚点');
-    assert.match(timezoneCode, /class="wat-work-hint"/, '弹层里要有沟通时间行');
-    assert.match(timezoneCode, /watContactWorkHint: true,\s*watContactWorkStart: 9,\s*watContactWorkEnd: 18,\s*watContactWorkWeekends: false/, 'timezone 要有沟通时间默认值');
-
-    // 设置页要能改这几项，并且开关的默认语义与 timezone 一致。
-    const optionsCode = source('options.js');
-    const optionsHtml = source('options.html');
-    for (const id of ['watContactWorkHint', 'watContactWorkStart', 'watContactWorkEnd', 'watContactWorkWeekends']) {
-      assert.match(optionsHtml, new RegExp(`id="${id}"`), `设置页缺少 ${id}`);
-    }
-    assert.match(optionsCode, /watContactWorkHint: true,\s*watContactWorkStart: 9,\s*watContactWorkEnd: 18,\s*watContactWorkWeekends: false/, '设置页默认值要与 timezone 一致');
-    assert.match(optionsCode, /\$\(id\)\.addEventListener\("blur", \(\) => normalizeWorkHours\(\)\)/, '时间填反要自动纠正');
-    assert.match(source('options.css'), /\.work-window-settings/, '设置页要有对应样式');
-    assert.match(source('timezone.css'), /\.wat-work-hint/, '页面提示要有对应样式');
-  });
-
   await test('customer presence drives the online indicator', async () => {
     const sandbox = presenceModule({ watPresenceIndicator: true });
     const P = sandbox.presenceApi;
@@ -886,6 +794,21 @@ async function run() {
     // WhatsApp 没公开状态（或还没渲染出这一行）时不能假装"离线"。
     assert.equal(P.detectPresence(null), null);
     assert.equal(P.detectPresence(fakePresenceHeader(null)), null);
+
+    // 实测踩到的坑：WhatsApp 的图标字体把连字名当成文本渲染，
+    // 状态行被读成 "ic-person-filled"，然后原样显示在面板上，看着像乱码。
+    // 认不出来的文本一律当作"读不到"——宁可收起指示灯，也不要显示内部标识。
+    assert.equal(P.looksLikePresenceText('ic-person-filled'), false);
+    assert.equal(P.looksLikePresenceText('点击此处查看联系人信息'), false);
+    assert.equal(P.looksLikePresenceText(''), false);
+    assert.equal(P.looksLikePresenceText('在线'), true);
+    assert.equal(P.looksLikePresenceText('最后上线时间 昨天 21:10'), true);
+    assert.equal(P.detectPresence(fakePresenceHeader('ic-person-filled')), null, '图标名不能被当成状态文案');
+    // 图标元素要跳过，不能因为它是第一个有文本的节点就采用它。
+    const iconElement = { className: 'ic-person-filled', closest: () => null, getAttribute: () => null };
+    assert.equal(P.isIconLike(iconElement), true, 'ic- 前缀的类名要认成图标');
+    assert.equal(P.isIconLike({ className: 'x1rg5ohu', closest: () => null, getAttribute: () => null }), false);
+    assert.equal(P.isIconLike({ className: '', closest: selector => selector.includes('svg') ? {} : null, getAttribute: () => null }), true, 'svg 里的元素要跳过');
 
     let fixture = fakePresenceRoot();
     sandbox.activeHeader = fakePresenceHeader('在线');
@@ -932,24 +855,70 @@ async function run() {
 
     // 计算与渲染都要真的接到页面上。
     const timezoneCode = source('timezone.js');
-    assert.match(timezoneCode, /<span class="wat-presence" hidden><\/span>/, '摘要条里要有状态灯锚点');
     assert.match(timezoneCode, /class="wat-presence-hint"/, '弹层里要有状态行');
-    assert.match(timezoneCode, /renderWorkHint\(root, state\);\s*renderPresence\(root, state\.title\);/, 'renderKnown 要渲染状态灯');
-    assert.match(timezoneCode, /renderWorkHint\(root, \{ timezone: null \}\);\s*renderPresence\(root, title\);/, 'renderUnknown 要渲染状态灯');
+    assert.match(timezoneCode, /renderPresence\(root, state\.title\);/, 'renderKnown 要渲染状态灯');
+    assert.match(timezoneCode, /renderPresence\(root, title\);/, 'renderUnknown 要渲染状态灯');
     assert.match(timezoneCode, /if \(root\) renderPresence\(root, activeState\?\.title\);/, '定时刷新要同步状态灯');
-    assert.match(timezoneCode, /watContactWorkHint: true,\s*watContactWorkStart: 9,\s*watContactWorkEnd: 18,\s*watContactWorkWeekends: false,\s*(?:\/\/[^\n]*\n\s*)*watPresenceIndicator: true/, 'timezone 要有在线状态默认值');
+    assert.match(timezoneCode, /watPresenceIndicator: true/, 'timezone 要有在线状态默认值');
 
-    // 弹层里的两个快捷开关必须写回与设置页相同的存储键。
+    // 状态灯要排在摘要条最右侧（当地时间之后），不能再排在最前面。
+    assert.match(timezoneCode, /<span class="wat-time">--:--<\/span>\s*<span class="wat-presence" hidden><\/span>/,
+      '状态灯要排在时间之后');
+    assert.doesNotMatch(timezoneCode, /<span class="wat-presence" hidden><\/span>\s*<span class="wat-region">/,
+      '状态灯不应再排在地区名前面');
+
+    // 快捷开关必须写回与设置页相同的存储键。
     assert.match(timezoneCode, /\.wat-presence-toggle"\)\.addEventListener\("change", \(event\) => \{\s*safeStorageSet\(\{ watPresenceIndicator: event\.target\.checked \}\)/, '状态开关要写回设置');
-    assert.match(timezoneCode, /\.wat-work-toggle"\)\.addEventListener\("change", \(event\) => \{\s*safeStorageSet\(\{ watContactWorkHint: event\.target\.checked \}\)/, '沟通时间开关要写回设置');
 
     const optionsCode = source('options.js');
     const optionsHtml = source('options.html');
     assert.match(optionsHtml, /id="watPresenceIndicator"/, '设置页要能关掉状态灯');
-    assert.match(optionsCode, /watContactWorkWeekends: false,\s*watPresenceIndicator: true/, '设置页默认值要与 timezone 一致');
+    assert.match(optionsCode, /watPresenceIndicator: true/, '设置页默认值要与 timezone 一致');
     assert.match(optionsCode, /\$\("watPresenceIndicator"\)\.checked = settings\.watPresenceIndicator !== false;/, '设置页读取状态开关');
     assert.match(source('timezone.css'), /\.wat-presence\[data-state="online"\]/, '在线状态灯要有样式');
-    assert.match(source('timezone.css'), /\.wat-toggle input:checked \+ i/, '快捷开关要有样式');
+
+    // 开关样式。这里钉的是两个真实踩过的坑，不是风格偏好。
+    const css = source('timezone.css');
+    // ① 选择器要带 ID 前缀。下面那条给文本框/下拉用的 `#wat-region-time-root input`
+    //    是 ID 选择器，优先级高于 `.wat-toggle input`，会把 height 改成 34px。
+    //    原生 checkbox 虽然 opacity: 0 看不见，但可点击区域比视觉开关高出一截 ——
+    //    点到开关下方也会切换。
+    assert.match(css, /#wat-region-time-root \.wat-toggle input \{/, '开关的原生 input 规则要带 ID 前缀');
+    assert.match(css, /#wat-region-time-root \.wat-toggle input:focus \{/, '开关的 focus 规则也要带 ID 前缀');
+    // ② 滑块必须绝对定位。用 margin 的话，块级盒子的上外边距会和父级 `i` 合并，
+    //    把滑块整体顶到轨道顶部 —— 看起来偏上、不居中。
+    assert.match(css, /#wat-region-time-root \.wat-toggle i \{[^}]*position: relative/, '轨道要作为滑块的定位参照');
+    assert.match(css, /#wat-region-time-root \.wat-toggle i::after \{[^}]*position: absolute/, '滑块要绝对定位');
+    assert.match(css, /#wat-region-time-root \.wat-toggle i::after \{[^}]*top: 2px/, '滑块上下留白要写死，不能靠外边距');
+    assert.doesNotMatch(css, /#wat-region-time-root \.wat-toggle i::after \{[^}]*margin:/, '滑块不能用 margin 定位');
+    assert.match(css, /#wat-region-time-root \.wat-toggle input:checked \+ i/, '快捷开关要有样式');
+  });
+
+  // 移除一个功能最怕"删了渲染、留下设置项"或反过来 —— 半截状态最难维护。
+  // 这条用例把"整条链路都不存在"钉死，防止以后有人只补回一半。
+  await test('沟通时间提示功能已彻底移除', async () => {
+    const removedSymbols = [
+      'watContactWorkHint', 'watContactWorkStart', 'watContactWorkEnd', 'watContactWorkWeekends',
+      'wat-work', 'renderWorkHint', 'describeContactWorkHours', 'workHourRange',
+      'minutesUntilWorkWindow', 'formatWorkGap', 'normalizeWorkHours', 'WORK_DEFAULTS',
+      '提示客户沟通时间', '沟通时间'
+    ];
+    for (const file of ['timezone.js', 'timezone.css', 'options.js', 'options.html', 'options.css']) {
+      const text = source(file);
+      for (const symbol of removedSymbols) {
+        assert.equal(text.includes(symbol), false, `${file} 里还残留 ${symbol}`);
+      }
+    }
+
+    // 默认值里也不能留：留着就是"读得到但没人用"的孤儿设置。
+    const { run: checkDefaults } = require('./defaults-consistency.cjs');
+    const { problems, authoritySize } = checkDefaults();
+    assert.deepEqual(problems, [], '默认值一致性门禁应通过');
+    assert.equal(authoritySize, 30, `权威默认值应为 30 键，实际 ${authoritySize}`);
+
+    // 保留下来的那一项必须还在，别把无关的东西一起删了。
+    assert.match(source('options.html'), /id="watPresenceIndicator"/, '状态灯开关不该被误删');
+    assert.match(source('options.css'), /\.panel-settings/, '设置页对应样式要跟上');
   });
 
   // 文字系统识别：重构前是 42 个分支的 if 链，且零测试覆盖。

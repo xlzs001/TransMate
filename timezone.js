@@ -3273,11 +3273,6 @@
     watChatTranslationFontSize: 13,
     watHideImmersiveTranslations: true,
     watChatShortcut: "Alt+Q",
-    // 客户沟通时间建议：按客户当地工作时段提示"现在发合不合适"。
-    watContactWorkHint: true,
-    watContactWorkStart: 9,
-    watContactWorkEnd: 18,
-    watContactWorkWeekends: false,
     // 客户在线状态指示灯：读 WhatsApp 自己的在线状态文案，不额外发任何请求。
     watPresenceIndicator: true
   };
@@ -4300,6 +4295,31 @@
     return PRESENCE_ONLINE_PATTERN.test(value);
   }
 
+  /**
+   * 只采用"认得出是状态文案"的文本。
+   *
+   * 为什么必须校验：状态行附近夹着图标元素和页面自己的提示文案，它们都不是客户状态。
+   * 实测踩到的例子：WhatsApp 的图标字体把连字名当成文本渲染，
+   * 于是面板上原样显示了一串 "ic-person-filled"，看起来像乱码。
+   * 宁可不显示 —— 与"读不到就收起、不假装离线"是同一个取向。
+   */
+  function looksLikePresenceText(text) {
+    const value = cleanText(text);
+    if (!value) return false;
+    return PRESENCE_TYPING_PATTERN.test(value)
+      || PRESENCE_OFFLINE_PATTERN.test(value)
+      || PRESENCE_ONLINE_PATTERN.test(value);
+  }
+
+  /** 图标 / 装饰元素：它们身上没有状态文案，跳过继续往后找。 */
+  function isIconLike(element) {
+    if (!element) return true;
+    if (element.closest && element.closest("svg, img, i, picture")) return true;
+    if (element.getAttribute && element.getAttribute("aria-hidden") === "true") return true;
+    const className = typeof element.className === "string" ? element.className : "";
+    return /(^|[\s_-])ic[_-]/i.test(className);
+  }
+
   /** 找标题下方那一行状态文案（"在线" / "最后上线时间 …"）所在的元素。 */
   function getPresenceElement(header) {
     if (!header) return null;
@@ -4319,6 +4339,8 @@
       const node = walker.currentNode;
       const parent = node.parentElement;
       if (!parent || title.contains(parent) || parent.closest(`#${ROOT_ID}`)) continue;
+      // 图标元素先跳过：它的文本是图标名，不是状态文案。
+      if (isIconLike(parent)) continue;
       if (cleanText(node.textContent)) return parent;
     }
     return null;
@@ -4329,7 +4351,8 @@
     if (!element) return null;
     // WhatsApp 把完整文案放在 title 上，页面上显示的那份可能被截断。
     const text = cleanText(element.getAttribute("title") || element.textContent);
-    if (!text) return null;
+    // 认不出来的文本一律当作"读不到"：宁可收起指示灯，也不要显示一串内部标识。
+    if (!looksLikePresenceText(text)) return null;
     return { online: isOnlinePresence(text), text };
   }
 
@@ -4376,132 +4399,16 @@
     lastPresenceOnline = presence.online;
   }
 
-  // ---------------------------------------------------------------------------
-  // 客户沟通时间建议
-  //
-  // 只显示"客户当地时间"还不够——业务员真正需要的是"现在发出去合不合适"。
-  // 这里按客户当地的工作时段判断，不在时段内就给出还要等多久。
-  // 全部是本地时间计算，不联网、不消耗任何额度。
-  // ---------------------------------------------------------------------------
-  var WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-  var clockPartFormatters = /* @__PURE__ */ new Map();
-  var weekdayFormatters = /* @__PURE__ */ new Map();
-  function contactClockParts(timezone) {
-    if (!clockPartFormatters.has(timezone)) {
-      clockPartFormatters.set(timezone, new Intl.DateTimeFormat("en-US", {
-        timeZone: timezone,
-        hour: "2-digit",
-        minute: "2-digit",
-        hourCycle: "h23"
-      }));
-    }
-    const parts = {};
-    for (const part of clockPartFormatters.get(timezone).formatToParts(/* @__PURE__ */ new Date())) {
-      parts[part.type] = part.value;
-    }
-    return { hour: Number(parts.hour) || 0, minute: Number(parts.minute) || 0 };
-  }
-  function contactWeekday(timezone) {
-    if (!weekdayFormatters.has(timezone)) {
-      weekdayFormatters.set(timezone, new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }));
-    }
-    const index = WEEKDAY_INDEX[weekdayFormatters.get(timezone).format(/* @__PURE__ */ new Date())];
-    return index === void 0 ? 1 : index;
-  }
-  function workHourRange(config) {
-    const rawStart = Number(config?.watContactWorkStart);
-    const start = Math.min(23, Math.max(0, Number.isFinite(rawStart) ? rawStart : 9));
-    const rawEnd = Number(config?.watContactWorkEnd);
-    const end = Math.min(24, Math.max(start + 1, Number.isFinite(rawEnd) ? rawEnd : 18));
-    return { start, end, startMinutes: start * 60, endMinutes: end * 60 };
-  }
-  /** 距离客户下一个工作时段开始还有多少分钟；正在时段内返回 0。 */
-  function minutesUntilWorkWindow(weekday, minutes, startMinutes, endMinutes, includeWeekends) {
-    const isWorkday = (day) => includeWeekends || (day !== 0 && day !== 6);
-    let day = weekday;
-    let elapsed = 0;
-    let current = minutes;
-    for (let step = 0; step < 8; step += 1) {
-      if (isWorkday(day)) {
-        if (current < startMinutes) return elapsed + (startMinutes - current);
-        if (current < endMinutes) return 0;
-      }
-      elapsed += 1440 - current;
-      current = 0;
-      day = (day + 1) % 7;
-    }
-    return 0;
-  }
-  function formatWorkGap(minutes) {
-    const total = Math.max(0, Math.round(minutes));
-    const hours = Math.floor(total / 60);
-    const rest = total % 60;
-    if (hours && rest) return `${hours} \u5C0F\u65F6 ${rest} \u5206`;
-    if (hours) return `${hours} \u5C0F\u65F6`;
-    return `${rest} \u5206`;
-  }
-  function describeContactWorkHours(timezone, config) {
-    const { start, end, startMinutes, endMinutes } = workHourRange(config);
-    const includeWeekends = config?.watContactWorkWeekends === true;
-    const clock = contactClockParts(timezone);
-    const minutes = clock.hour * 60 + clock.minute;
-    const pad = (value) => String(value).padStart(2, "0");
-    const localTime = `${pad(clock.hour)}:${pad(clock.minute)}`;
-    const range = `${pad(start)}:00\u2013${pad(end)}:00`;
-    const gap = minutesUntilWorkWindow(contactWeekday(timezone), minutes, startMinutes, endMinutes, includeWeekends);
-    if (gap === 0) {
-      return { inWindow: true, localTime, range, text: `\u5BA2\u6237\u5F53\u5730\u65F6\u95F4 ${localTime}\uFF0C\u5904\u4E8E\u5DE5\u4F5C\u65F6\u6BB5\uFF08${range}\uFF09\uFF0C\u53EF\u4EE5\u76F4\u63A5\u53D1\u9001\u3002` };
-    }
-    return {
-      inWindow: false,
-      localTime,
-      range,
-      text: `\u5BA2\u6237\u5F53\u5730\u65F6\u95F4 ${localTime}\uFF0C\u4E0D\u5728\u5DE5\u4F5C\u65F6\u6BB5\uFF08${range}\uFF09\uFF0C\u8DDD\u5BA2\u6237\u4E0A\u73ED\u8FD8\u6709\u7EA6 ${formatWorkGap(gap)}\u3002`
-    };
-  }
-  function renderWorkHint(root, state) {
-    const marker = root.querySelector(".wat-work");
-    const detail = root.querySelector(".wat-work-hint");
-    if (!marker || !detail) return;
-    const timezone = state?.timezone;
-    if (!timezone || activeConfig.watContactWorkHint !== true) {
-      marker.hidden = true;
-      marker.removeAttribute("title");
-      delete root.dataset.work;
-      detail.textContent = activeConfig.watContactWorkHint === true ? "\u2014" : "\u5DF2\u5173\u95ED";
-      delete detail.dataset.state;
-      return;
-    }
-    let info = null;
-    try {
-      info = describeContactWorkHours(timezone, activeConfig);
-    } catch (_) {
-      info = null;
-    }
-    if (!info) {
-      marker.hidden = true;
-      delete root.dataset.work;
-      detail.textContent = "\u2014";
-      delete detail.dataset.state;
-      return;
-    }
-    marker.hidden = info.inWindow;
-    marker.title = info.text;
-    root.dataset.work = info.inWindow ? "in" : "out";
-    detail.textContent = info.text;
-    detail.dataset.state = info.inWindow ? "in" : "out";
-  }
   function createRoot() {
     const root = document.createElement("div");
     root.id = ROOT_ID;
     root.className = "wat-root";
     root.innerHTML = `
     <button class="wat-summary" type="button" aria-label="\u67E5\u770B\u5BA2\u6237\u5730\u533A\u4E0E\u5F53\u5730\u65F6\u95F4" aria-expanded="false" aria-controls="wat-region-time-popover">
-      <span class="wat-presence" hidden></span>
       <span class="wat-region">\u8BC6\u522B\u4E2D</span>
       <span class="wat-time-label">\u5F53\u5730\u65F6\u95F4\uFF1A</span>
       <span class="wat-time">--:--</span>
-      <span class="wat-work" hidden></span>
+      <span class="wat-presence" hidden></span>
     </button>
     <div id="wat-region-time-popover" class="wat-popover" role="dialog" aria-label="\u5BA2\u6237\u5730\u533A\u3001\u65F6\u95F4\u4E0E\u8BED\u8A00\u8BBE\u7F6E" hidden>
       <div class="wat-popover-header">
@@ -4514,11 +4421,6 @@
         <span>\u72B6\u6001</span>
         <strong class="wat-presence-hint">\u2014</strong>
         <label class="wat-toggle" title="\u663E\u793A\u5BA2\u6237\u5728\u7EBF\u72B6\u6001\u6307\u793A\u706F"><input class="wat-presence-toggle" type="checkbox" role="switch" aria-label="\u5BA2\u6237\u5728\u7EBF\u72B6\u6001\u6307\u793A\u706F" /><i></i></label>
-      </div>
-      <div class="wat-detail-row wat-work-row">
-        <span>\u6C9F\u901A\u65F6\u95F4</span>
-        <strong class="wat-work-hint">\u2014</strong>
-        <label class="wat-toggle" title="\u663E\u793A\u5BA2\u6237\u6C9F\u901A\u65F6\u95F4\u5EFA\u8BAE"><input class="wat-work-toggle" type="checkbox" role="switch" aria-label="\u5BA2\u6237\u6C9F\u901A\u65F6\u95F4\u5EFA\u8BAE" /><i></i></label>
       </div>
       <label class="wat-detail-row"><span>\u5BA2\u6237\u8BED\u8A00</span><select class="wat-language"></select></label>
       <label class="wat-detail-row wat-profile-row">
@@ -4577,13 +4479,10 @@
       event.target.classList.remove("wat-invalid");
       event.target.dataset.dirty = "true";
     });
-    // 两个快捷开关直接写在对应的信息行旁边：改完立刻生效，不用再跑去设置页。
+    // 快捷开关直接写在信息行旁边：改完立刻生效，不用再跑去设置页。
     // 存储键与设置页共用，写回后 storage.onChanged 会触发一次重渲染。
     root.querySelector(".wat-presence-toggle").addEventListener("change", (event) => {
       safeStorageSet({ watPresenceIndicator: event.target.checked });
-    });
-    root.querySelector(".wat-work-toggle").addEventListener("change", (event) => {
-      safeStorageSet({ watContactWorkHint: event.target.checked });
     });
     installDragBehavior(root, summary);
     return root;
@@ -4855,7 +4754,6 @@
     root.dataset.state = "unknown";
     root.querySelector(".wat-region").textContent = "\u5730\u533A\u672A\u8BC6\u522B";
     root.querySelector(".wat-time").textContent = "\u70B9\u51FB\u8BBE\u7F6E";
-    renderWorkHint(root, { timezone: null });
     renderPresence(root, title);
     root.querySelector(".wat-phone").textContent = "\u672A\u4ECE\u9875\u9762\u53D6\u5F97\u53F7\u7801";
     root.querySelector(".wat-phone").removeAttribute("title");
@@ -4890,7 +4788,6 @@
     root.dataset.state = "known";
     root.querySelector(".wat-region").textContent = state.region;
     root.querySelector(".wat-time").textContent = formatLocalTime(state.timezone);
-    renderWorkHint(root, state);
     renderPresence(root, state.title);
     root.querySelector(".wat-phone").textContent = state.phone;
     root.querySelector(".wat-phone").title = state.phone;
@@ -5136,7 +5033,6 @@
     const root = document.getElementById(ROOT_ID);
     if (root && activeState?.timezone) {
       root.querySelector(".wat-time").textContent = formatLocalTime(activeState.timezone);
-      renderWorkHint(root, activeState);
     }
     if (root) renderPresence(root, activeState?.title);
     if (activeHeader && !activeHeader.isConnected) scheduleUpdate(0);

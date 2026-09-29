@@ -37,8 +37,13 @@ node temp/regression-checks.cjs
 
 # 弹层 UI 视觉校验（生成静态预览页，再用 Chrome 截图看效果）
 node temp/preview-ui.cjs
-chrome --headless --force-device-scale-factor=2 --window-size=640,700 \
-  --screenshot=temp/crops/popover.png file:///<绝对路径>/temp/preview-ui.html
+# 会生成 preview-ui{-b,-c}.html（弹层三种状态）和 preview-summary{-b,-c}.html（摘要条三种状态）
+# Chrome 截图：--screenshot 必须给**绝对 Windows 路径**，否则报"找不到指定的路径"；
+# 相对路径只在 file:// 里能用。且要用 --headless=new。
+"/c/Program Files/Google/Chrome/Application/chrome.exe" --headless=new --disable-gpu \
+  --force-device-scale-factor=2 --window-size=620,600 \
+  --screenshot='C:\Users\hengchu\Desktop\Mark\Mark\TransMate\temp\shots\preview-ui.png' \
+  'file:///C:/Users/hengchu/Desktop/Mark/Mark/TransMate/temp/preview-ui.html'
 
 # H1/H2 修复验证 + M1/M2/M3/M5 修复验证（8 项，遗留项应为空）
 node temp/review-checks.cjs
@@ -108,11 +113,18 @@ Node / Python 用 managed 版本：
   `{ text, warnings }`，`pumpChatTranslationQueue` 的 `translated` Map 值同结构，
   判空用 `!payload?.text`。警告 DOM **必须挂在译文元素内部**，才能复用现有的
   `[data-tlp-chat-translation="1"]` 过滤，否则 MutationObserver 会死循环。
-- **客户沟通时间建议**（v3.9.7）：`watContactWorkHint/Start/End/Weekends` 四个设置项，
-  timezone.js 与 options.js 的默认值必须一致（`true / 9 / 18 / false`）。
-  `workHourRange()` 自愈（`end = max(start+1, end)`），设置页 `normalizeWorkHours()` 同步纠正。
-  计算全部是本地 `Intl` 运算，不联网。**新增函数必须真的接到 `renderKnown` / `renderUnknown` /
-  15 秒 `clockTimer` 三处**，否则是死代码（这次差点漏掉，已加回归断言守住）。
+- **客户沟通时间建议已于 v3.9.9 整块删除**（v3.9.7 加的，2026-09-29 用户要求去掉）。
+  删除范围：`timezone.js` 的整个模块（`workHourRange` / `minutesUntilWorkWindow` /
+  `formatWorkGap` / `describeContactWorkHours` / `renderWorkHint` / `WEEKDAY_INDEX` 等 115 行）、
+  `.wat-work` 弹层行、`timezone.css` 的 `.wat-work*` 全部规则、`options.html` 的
+  `work-window-settings` 块、`options.js` 的 `WORK_DEFAULTS` 与 `normalizeWorkHours()`、
+  以及 4 个 `watContactWork*` 存储键。**不要再加回来。**
+  `DISPLAY_DEFAULTS` 现在只剩 `watPresenceIndicator: true` 一个键。
+  回归测试里有一条「沟通时间提示功能已彻底移除」会扫 5 个文件、断言 14 个符号全无残留 ——
+  想复活这个功能会先被它拦下。
+  （原设计的坑记下来备查：`workHourRange()` 要自愈 `end = max(start+1, end)`，
+  设置页 `normalizeWorkHours()` 同步纠正；新增函数必须真的接到
+  `renderKnown` / `renderUnknown` / 15 秒 `clockTimer` 三处，否则是死代码。）
 - **设置页里默认值为 `false` 的开关不能走 `settings[key] !== false` 那个循环**，
   那样 `undefined` 会被判成 `true`。默认 false 的项要单独写 `=== true`。
 - **硬信息校验最容易死在误报上**（v3.9.8 修，用户直接拿截图反馈了两条）。
@@ -130,10 +142,29 @@ Node / Python 用 managed 版本：
   先判在线会把离线误判成在线。顺序是：正在输入 → 离线文案 → 在线文案。
   状态直接读 WhatsApp 标题下方那一行（`title` 属性优先，页面上可能是截断的），
   **不额外发任何请求**；读不到时指示灯自动收起，不假装"离线"。
-- **弹层里的快捷开关与设置页共用同一存储键**（v3.9.8）：`.wat-presence-toggle` /
-  `.wat-work-toggle` 的 change 直接 `safeStorageSet`，靠 `storage.onChanged` 触发重渲染。
-  写 `.wat-toggle` 的 CSS 时注意**要盖掉那条给文本框用的
-  `#wat-region-time-root input { height: 34px; border: ...; background: ... }` 通用规则**。
+- **在线状态读取必须"认不出就不显示"**（v3.9.9 加）。根因：WhatsApp 用图标字体渲染图标，
+  图标名（连字名）本身就是文本，字体没加载时会原样显示成 `ic-person-filled` 这类内部标识。
+  原来 `getPresenceElement` 的 TreeWalker 兜底"取第一个有文本的元素"会把它选中，
+  于是面板上显示一串乱码。修法：新增 `looksLikePresenceText()`（白名单：只认
+  在线/最后上线/正在输入等已知文案）+ `isIconLike()`（跳过 `svg/img/i/picture`、
+  `aria-hidden="true"`、类名含 `ic-`/`ic_` 的元素），`detectPresence` 末尾
+  `if (!looksLikePresenceText(text)) return null;`。
+  **通用原则：从外部页面抓信息时，默认应该是"不显示"，而不是"显示点什么"。**
+- **在线状态指示灯在摘要条的最右侧**（v3.9.9 移动，原来在最左）。
+  摘要条 DOM 顺序：`.wat-region` → `.wat-time-label` → `.wat-time` → `.wat-presence`。
+  `.wat-presence` 有 `margin-left: calc(2px * var(--wat-scale))`，读不到时 `hidden` 收起、右侧不留空。
+  读的顺序是"先看时间，再看人在不在线"。
+- **弹层里的快捷开关与设置页共用同一存储键**（v3.9.8）：`.wat-presence-toggle` 的 change
+  直接 `safeStorageSet`，靠 `storage.onChanged` 触发重渲染。`.wat-work-toggle` 已随沟通时间功能删除。
+- **自定义控件的 CSS 有两个必踩的坑**（v3.9.9 实测踩到，两处都不报错、只能肉眼发现）：
+  ① **选择器优先级**：给文本框 / 下拉用的通用规则 `#wat-region-time-root input`
+  带 **ID 选择器**，优先级高于 `.wat-toggle input`（只有类选择器），会把开关里
+  `opacity: 0` 的隐藏 checkbox 撑成 34px 高 + 1px 边框 + 9px 内边距 ——
+  视觉开关 18px，但点到下方 16px 也会切换。**修法：给开关的选择器也加 ID 前缀。**
+  ② **外边距合并**：`i::after` 是块级盒子，`margin: 2px` 会和父级 `i` 合并，
+  把滑块顶到轨道顶部（偏上、不居中）。**修法：改绝对定位
+  `position: absolute; top: 2px; left: 2px`。** 规则：小控件里用绝对定位，别用 margin 当坐标。
+  这两条无法自动门禁，只能靠 `node temp/preview-ui.cjs` + 浏览器截图看。
 - **弹层静态预览的坑**：预览页里想让弹层默认展开，`[hidden] { display: block !important }`
   **必须放在 timezone.css 之后**，否则会被 css 里同名规则盖掉，截出来是空白的。
 - `relay/` 是独立部署的服务端组件，**不打进扩展源码包**。用户没有域名，此方案暂搁置。
@@ -164,8 +195,15 @@ M5（busy 静默丢弃），`review-checks.cjs` 的遗留项已清零。v3.9.7 �
 
 ## 工程质量设施（v3.9.9 建立，2026-09-29）
 
-**真实工作目录是 `C:/Users/hengchu/Desktop/Mark/Mark/TransMate/`**（不是 `TransMatev3.7.3`，那是 v3.9.0 旧副本；
-同级还有 `TransMate-v3.9.5/3.9.7/3.9.8-源码/` 三个目录和 5 个历史 zip，用户尚未决定是否清理）。
+**真实工作目录是 `C:/Users/hengchu/Desktop/Mark/Mark/TransMate/`**（不是 `TransMatev3.7.3`，那是 v3.9.0 旧副本）。
+
+**历史版本已于 2026-09-29 清理**（用户同意）。三个源码目录
+（`TransMate-v3.9.5/3.9.7/3.9.8-源码/`）、4 个历史 zip（3.9.5–3.9.8）、旧副本 `TransMatev3.7.3`
+全部移入 `Mark/Mark/_归档-历史版本-20260929/`（zip 在 `zips/` 子目录）。
+**当前只保留 `TransMate-v3.9.9-源码.zip`。**
+`Mark/Mark/TransMatev3.7.3/` 还留了一个**空壳目录**删不掉 —— 它被别的进程占着
+（`mv`/`rmdir`/回收站全部失败，报 `Device or resource busy`），内容已全部搬空，
+等占用进程释放后手工删掉即可。
 
 ### 提交前必跑
 
@@ -236,17 +274,18 @@ ESLint 走官方 Node API。**不要改回 spawn 版本**，否则本机无法�
 
 ### 质量基线（v3.9.9 复测，供下次对比）
 
-自有代码 4214 行（排除 vendored 3230）｜函数 406（107 个单行取值器，299 计入统计）
-函数长度 最长 97 / P90 30 / 中位数 8｜复杂度 最高 24 / P90 11 / 中位数 3
+自有代码 4074 行（排除 vendored 3230）｜函数 396（105 个单行取值器，291 计入统计）
+函数长度 最长 89 / P90 29 / 中位数 8｜复杂度 最高 24 / P90 11 / 中位数 3
 空 catch 12 处（全部有说明）｜重复代码 11 组（全是默认值表，已被门禁守）
 
 **注意 `popup.js` 135→158 行、`verify.js` 211→247 行 —— 行数是涨的**，
 因为拆函数本身要写更多行。**看分布，不看总量。**
+反过来，自有代码 4214→4074 是**删掉"沟通时间"功能**带来的下降，与重构无关，别混为一谈。
 
 已拆完（初版基线里排最前的四个）：`popup.js:render`（31→12）、
 `timezone.js:update`（32→ 掉出榜）、`background.js:translateChatBatch`（115 行/22→47 行/8）、
 `verify.js` 两个函数（17/24 → 3/1）。
 
-**质量预算名单还剩 8 条**，高优先：`options.js:loadSettings`（62/24）、
+**质量预算名单还剩 8 条**，高优先：`options.js:loadSettings`（56/24）、
 `timezone.js:pumpChatTranslationQueue`（56/24）、`timezone.js:translateVisibleChat`（43/24）。
-有意接受（长但不绕）：`background.js:callProvider`（89 行/13）、`timezone.js:createRoot`（97 行/4）。
+有意接受（长但不绕）：`background.js:callProvider`（89 行/13）、`timezone.js:createRoot`（88 行/4）。

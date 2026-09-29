@@ -205,28 +205,10 @@
         </div>
       </div>
 
-      <div class="work-window-settings">
+      <div class="panel-settings">
         <label class="check-row">
           <input id="watPresenceIndicator" type="checkbox" />
-          <span><b>客户在线状态指示灯</b><small>在标签上用一个绿点表示客户当前在线、灰点表示离线；客户从离线变为在线时灯会闪几下。状态直接读 WhatsApp 自己显示的那一行，不额外发任何请求。</small></span>
-        </label>
-        <label class="check-row">
-          <input id="watContactWorkHint" type="checkbox" />
-          <span><b>提示客户沟通时间</b><small>按客户当地时间判断是否处于工作时段：不在时段内会在标签上亮起橙点，弹层里写明距离客户上班还有多久。</small></span>
-        </label>
-        <div class="grid two compact">
-          <label class="field">
-            <span>上班时间</span>
-            <div class="unit-input"><input id="watContactWorkStart" type="number" min="0" max="23" step="1" /><i>点</i></div>
-          </label>
-          <label class="field">
-            <span>下班时间</span>
-            <div class="unit-input"><input id="watContactWorkEnd" type="number" min="1" max="24" step="1" /><i>点</i></div>
-          </label>
-        </div>
-        <label class="check-row">
-          <input id="watContactWorkWeekends" type="checkbox" />
-          <span><b>客户周末也算工作日</b><small>中东等地区周末照常办公时可勾选；默认只在周一到周五给出提示。</small></span>
+          <span><b>客户在线状态指示灯</b><small>在标签右侧用一个绿点表示客户当前在线、灰点表示离线；客户从离线变为在线时灯会闪几下。状态直接读 WhatsApp 自己显示的那一行，不额外发任何请求，也读不到时不显示。</small></span>
         </label>
       </div>
     </section>

@@ -28,10 +28,6 @@ const DEFAULTS = {
   watChatTranslationFontSize: 13,
   watHideImmersiveTranslations: true,
   watChatShortcut: "Alt+Q",
-  watContactWorkHint: true,
-  watContactWorkStart: 9,
-  watContactWorkEnd: 18,
-  watContactWorkWeekends: false,
   watPresenceIndicator: true
 };
 
@@ -54,14 +50,6 @@ const CHAT_DEFAULTS = {
   watChatTranslationFontSize: 13,
   watHideImmersiveTranslations: true,
   watChatShortcut: "Alt+Q"
-};
-
-const WORK_DEFAULTS = {
-  watContactWorkHint: true,
-  watContactWorkStart: 9,
-  watContactWorkEnd: 18,
-  watContactWorkWeekends: false,
-  watPresenceIndicator: true
 };
 
 const $ = (id) => document.getElementById(id);
@@ -258,17 +246,6 @@ function updateChatPreview() {
   $("watChatTranslationFontSizeValue").value = `${$("watChatTranslationFontSize").value}px`;
 }
 
-// 上班时间必须早于下班时间。后台也会兜底，但这里先纠一次，
-// 免得设置页显示的是用户填的、实际生效的却是另一个值。
-function normalizeWorkHours() {
-  const start = clamp($("watContactWorkStart").value, 0, 23, WORK_DEFAULTS.watContactWorkStart);
-  let end = clamp($("watContactWorkEnd").value, 1, 24, WORK_DEFAULTS.watContactWorkEnd);
-  if (end <= start) end = Math.min(24, start + 1);
-  $("watContactWorkStart").value = start;
-  $("watContactWorkEnd").value = end;
-  return { start, end };
-}
-
 function updateTranslationProfileHelp() {
   const profile = $("translationProfile").value;
   $("translationProfileHelp").textContent = TRANSLATION_PROFILE_HELP[profile] || TRANSLATION_PROFILE_HELP.immersive;
@@ -418,13 +395,7 @@ async function loadSettings() {
     if ($(key).type === "checkbox") $(key).checked = settings[key] !== false;
     else $(key).value = settings[key] ?? CHAT_DEFAULTS[key];
   }
-  $("watContactWorkHint").checked = settings.watContactWorkHint !== false;
   $("watPresenceIndicator").checked = settings.watPresenceIndicator !== false;
-  $("watContactWorkWeekends").checked = settings.watContactWorkWeekends === true;
-  $("watContactWorkStart").value = clamp(settings.watContactWorkStart, 0, 23, WORK_DEFAULTS.watContactWorkStart);
-  $("watContactWorkEnd").value = clamp(settings.watContactWorkEnd, 1, 24, WORK_DEFAULTS.watContactWorkEnd);
-  // 存的是"填反了"的历史值也要显示成实际生效的时段，否则设置页和页面提示对不上。
-  normalizeWorkHours();
   if (BROWSER_RESERVED_SHORTCUTS.has($("watChatShortcut").value.toLocaleLowerCase())) {
     const oldShortcut = $("watChatShortcut").value;
     $("watChatShortcut").value = CHAT_DEFAULTS.watChatShortcut;
@@ -493,9 +464,6 @@ for (const id of [
   $(id).addEventListener("input", updateChatPreview);
 }
 $("translationProfile").addEventListener("change", updateTranslationProfileHelp);
-for (const id of ["watContactWorkStart", "watContactWorkEnd"]) {
-  $(id).addEventListener("blur", () => normalizeWorkHours());
-}
 
 $("resetAppearance").addEventListener("click", () => {
   for (const [key, value] of Object.entries(APPEARANCE_DEFAULTS)) $(key).value = value;
@@ -576,7 +544,6 @@ $("save").addEventListener("click", async () => {
       .map((line) => line.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, ""))
       .filter(Boolean);
     const gemini = { ...presets.gemini, ...(providerConfigs.gemini || {}) };
-    const workHours = normalizeWorkHours();
     const values = {
       provider: activeProvider,
       providerConfigs,
@@ -606,10 +573,6 @@ $("save").addEventListener("click", async () => {
       watChatTranslationFontSize: clamp($("watChatTranslationFontSize").value, 10, 22, 13),
       watHideImmersiveTranslations: $("watHideImmersiveTranslations").checked,
       watChatShortcut: $("watChatShortcut").value.trim(),
-      watContactWorkHint: $("watContactWorkHint").checked,
-      watContactWorkStart: workHours.start,
-      watContactWorkEnd: workHours.end,
-      watContactWorkWeekends: $("watContactWorkWeekends").checked,
       watPresenceIndicator: $("watPresenceIndicator").checked
     };
     await chrome.storage.local.set(values);

@@ -115,29 +115,15 @@
   color: color-mix(in srgb, var(--wat-text) 48%, transparent);
 }
 
-/* 客户不在工作时段时的小圆点提醒；详细文案走 title 与弹层，避免撑宽摘要条。 */
-#wat-region-time-root .wat-work {
-  flex: none;
-  width: calc(7px * var(--wat-scale));
-  height: calc(7px * var(--wat-scale));
-  border-radius: 50%;
-  background: #f59e0b;
-  box-shadow: 0 0 0 calc(2px * var(--wat-scale)) rgba(245, 158, 11, .2);
-  cursor: help;
-}
-
-#wat-region-time-root[data-position="status-line"] .wat-work {
-  width: 6px;
-  height: 6px;
-  box-shadow: none;
-}
-
 /* 客户在线状态灯：只读 WhatsApp 自己显示的状态文案，不额外发请求。
-   在线实心绿点，离线灰点，读不到状态时整个收起（不假装离线）。 */
+   在线实心绿点，离线灰点，读不到状态时整个收起（不假装离线）。
+   排在摘要条最右侧 —— 它是"扫一眼"用的信息，放在时间之后不打断读时间；
+   左边多留一点间距，免得被当成时间的一部分。 */
 #wat-region-time-root .wat-presence {
   flex: none;
   width: calc(8px * var(--wat-scale));
   height: calc(8px * var(--wat-scale));
+  margin-left: calc(2px * var(--wat-scale));
   border-radius: 50%;
   background: color-mix(in srgb, var(--wat-text) 34%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wat-text) 26%, transparent);
@@ -278,31 +264,18 @@
   white-space: nowrap;
 }
 
-/* 状态 / 沟通时间这两行文案较长要换行，且末尾各带一个快捷开关，所以是"标签 + 值 + 开关"三列。 */
-#wat-region-time-root .wat-work-row,
+/* 状态行文案较长要换行，且末尾带一个快捷开关，所以是"标签 + 值 + 开关"三列。 */
 #wat-region-time-root .wat-presence-row {
   grid-template-columns: 78px minmax(0, 1fr) auto;
   align-items: start;
 }
 
-#wat-region-time-root .wat-work-row .wat-work-hint,
 #wat-region-time-root .wat-presence-row .wat-presence-hint {
   overflow: visible;
   white-space: normal;
   text-overflow: clip;
   font-weight: 500;
   line-height: 1.45;
-}
-
-#wat-region-time-root .wat-work-row .wat-work-hint {
-  color: #b45309;
-}
-
-#wat-region-time-root .wat-work-row .wat-work-hint[data-state="in"] {
-  color: #15803d;
-}
-
-#wat-region-time-root .wat-presence-row .wat-presence-hint {
   color: #667781;
 }
 
@@ -311,7 +284,13 @@
   font-weight: 650;
 }
 
-/* 弹层里的快捷开关。注意要盖掉上面那条给文本框/下拉用的 34px 通用 input 样式。 */
+/* 弹层里的快捷开关。这里有两个必须注意的点，都踩过：
+   ① 选择器要带上 #wat-region-time-root。下面那条给文本框 / 下拉用的通用规则写的是
+      `#wat-region-time-root input`（ID 选择器），优先级高于 `.wat-toggle input`，
+      会把 height 改成 34px、再加上 1px 边框和 9px 内边距。原生 checkbox 虽然
+      opacity: 0 看不见，但可点击区域比视觉开关高出一截 —— 点到开关下方也会切换。
+   ② 滑块用绝对定位，不要用 margin。`i::after` 是块级盒子，它的上外边距会和父级
+      `i` 发生外边距合并，把滑块整体顶到轨道顶部：看起来偏上、不居中，开关像是坏的。 */
 #wat-region-time-root .wat-toggle {
   position: relative;
   display: inline-block;
@@ -333,6 +312,7 @@
   border-radius: 9px;
   background: transparent;
   box-shadow: none;
+  appearance: none;
   opacity: 0;
   cursor: pointer;
 }
@@ -343,6 +323,7 @@
 }
 
 #wat-region-time-root .wat-toggle i {
+  position: relative;
   display: block;
   width: 30px;
   height: 18px;
@@ -353,10 +334,11 @@
 
 #wat-region-time-root .wat-toggle i::after {
   content: "";
-  display: block;
+  position: absolute;
+  top: 2px;
+  left: 2px;
   width: 14px;
   height: 14px;
-  margin: 2px;
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 2px rgba(11, 20, 26, .32);
