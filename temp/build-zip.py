@@ -17,7 +17,6 @@ include = [
     "background.js",
     "content.js",
     "providers.js",
-    "verify.js",
     "options.html",
     "options.js",
     "options.css",
@@ -27,6 +26,9 @@ include = [
     "timezone.js",
     "timezone.css",
     "安装说明.txt",
+    # MIT 要求许可声明随副本一起分发；第三方声明同理（timezone.js 里打包了两个库）。
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
 ]
 
 files = []

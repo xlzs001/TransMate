@@ -26,12 +26,12 @@ const LIMITS = {
 /**
  * 已知超标、暂时接受的位置。key 是 `文件:函数名`。
  * 每一条都要写清楚"打算怎么改" —— 写不出来就说明还没想清楚，那就不该放进来。
+ *
+ * 记录值必须跟着度量口径一起更新：度量把"整行注释"排除之后，所有数字都会变小，
+ * 这时如果名单还留着旧数字，R2（名单内不许变差）就会失效 ——
+ * 比如某函数记 62、实际 52，那它一路涨回 60 门禁都不会响。
  */
 const ALLOWED = new Map([
-  ['options.js:loadSettings', {
-    length: 62, complexity: 24,
-    plan: '按「读存储 / 校验 / 填表单」拆三段'
-  }],
   ['timezone.js:pumpChatTranslationQueue', {
     length: 56, complexity: 24,
     plan: '按「取待翻译 / 请求 / 回填」拆三段'
@@ -40,10 +40,6 @@ const ALLOWED = new Map([
     length: 43, complexity: 24,
     plan: '按「挑选待翻译节点 / 翻译 / 回填」拆三段'
   }],
-  ['options.js:runProviderAction', {
-    length: 46, complexity: 22,
-    plan: '按「校验输入 / 发请求 / 回填界面」拆三段'
-  }],
   ['timezone.js:getRecentIncomingMessages', {
     length: 45, complexity: 22,
     plan: '按「取候选节点 / 过滤 / 截断」拆三段'
@@ -51,14 +47,6 @@ const ALLOWED = new Map([
   ['timezone.js:findStatusAnchorRect', {
     length: 44, complexity: 16,
     plan: '按「找候选元素 / 算位置」拆两段'
-  }],
-  ['background.js:callProvider', {
-    length: 89, complexity: 13,
-    plan: '复杂度不高，只是长：六种服务商已各抽成独立函数，这里只剩分发。可暂缓'
-  }],
-  ['timezone.js:createRoot', {
-    length: 97, complexity: 4,
-    plan: '一整个面板的 DOM 模板。拆开反而更难和设计稿对照，倾向保留'
   }]
 ]);
 

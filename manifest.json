@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TransMate - 外贸翻译与客户时区",
-  "version": "3.9.9",
+  "version": "3.9.13",
   "description": "外贸商务翻译、WhatsApp 聊天窗口翻译，以及客户号码归属地区与当地时间。作者：Mark。",
   "author": "Mark",
   "permissions": [

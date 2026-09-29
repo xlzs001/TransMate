@@ -55,7 +55,6 @@
   let spaceCount = 0;
   let lastSpaceAt = 0;
   let lastSpaceField = null;
-  let requestSequence = 0;
 
   const sleep = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 
@@ -150,7 +149,7 @@
       maxWidth: "540px",
       padding: "11px 15px",
       borderRadius: "10px",
-      background: kind === "error" ? "#991b1b" : kind === "info" ? "#334155" : kind === "warn" ? "#92400e" : "#065f46",
+      background: kind === "error" ? "#991b1b" : kind === "info" ? "#334155" : "#065f46",
       color: "#fff",
       font: "13px/1.45 system-ui, -apple-system, Segoe UI, sans-serif",
       boxShadow: "0 8px 30px rgba(0,0,0,.28)",
@@ -158,20 +157,7 @@
     });
 
     (document.body || document.documentElement).appendChild(el);
-    setTimeout(
-      () => el.remove(),
-      kind === "error" ? 7000 : kind === "warn" ? 11000 : kind === "info" ? 3200 : 2500
-    );
-  }
-
-  /**
-   * 硬信息校验命中时提示用户核对。译文已经写进输入框了，这里只做提醒，
-   * 不阻止写入——模型绝大多数时候是对的，误报也不该打断用户的流程。
-   */
-  function showWarnings(warnings) {
-    const list = (warnings || []).map((item) => item?.message).filter(Boolean);
-    if (!list.length) return;
-    toast(`请核对译文里的关键信息：\n${list.map((line) => `· ${line}`).join("\n")}`, "warn");
+    setTimeout(() => el.remove(), kind === "error" ? 7000 : kind === "info" ? 3200 : 2500);
   }
 
   // ---------------------------------------------------------------------------
@@ -442,7 +428,7 @@
   }
 
   async function writeField(field, text, expectedCurrent = null) {
-    if (!field?.isConnected && field?.isConnected !== undefined) return false;
+    if (field?.isConnected === false) return false;
     if (expectedCurrent !== null && readField(field) !== preserveText(expectedCurrent)) return false;
     await ensureFocused(field);
     field.focus({ preventScroll: true });
@@ -454,9 +440,13 @@
     if (isTextInput(field)) return writeToInput(field, target, expectedCurrent);
 
     if (await insertViaExecCommand(field, target)) return true;
-    if (readField(field) !== preserveText(expectedCurrent)) return false;
+    // 这两处必须和上面一样先判 expectedCurrent !== null。
+    // preserveText(null) 得到的是 ""，而写入失败后输入框里还是原文、绝不是空串，
+    // 于是条件恒真、直接 return false —— 后面两个兜底方案永远轮不到执行。
+    // 现在唯一的调用点传的是字符串，所以还没暴露出来，但这是埋着的坑。
+    if (expectedCurrent !== null && readField(field) !== preserveText(expectedCurrent)) return false;
     if (await insertViaPasteEvent(field, target)) return true;
-    if (readField(field) !== preserveText(expectedCurrent)) return false;
+    if (expectedCurrent !== null && readField(field) !== preserveText(expectedCurrent)) return false;
     if (await insertViaDom(field, target)) return true;
 
     return false;
@@ -481,12 +471,11 @@
       return;
     }
 
-    const requestId = ++requestSequence;
     const context = HOST === "web.whatsapp.com" ? "chat" : "field";
     busy = true;
-    showSpinner(field);
 
     try {
+      showSpinner(field);
       const direction = detectDirection(source);
 
       const result = await chrome.runtime.sendMessage({
@@ -500,17 +489,18 @@
 
       const output = preserveText(result.text);
       if (!output) throw new Error("翻译结果为空");
-      if (requestId !== requestSequence || readField(field) !== source) {
+      // 这里只比"输入框内容有没有被用户改过"。
+      // 原来还有一个 `requestId !== requestSequence` 的并发判断，是死代码：
+      // 上面的 busy 已经保证同一时刻只有一条请求在飞，序列号在 await 期间不可能变。
+      // 留着它会让人以为这里存在并发保护，反而容易在别处放松警惕。
+      if (readField(field) !== source) {
         const copied = await copyToClipboard(output, field);
         throw new Error(copied
           ? "输入框内容已变化，未覆盖新内容；译文已复制到剪贴板。"
           : "输入框内容已变化，未覆盖新内容。译文：\n" + output);
       }
 
-      if (await writeField(field, output, source)) {
-        showWarnings(result.warnings);
-        return;
-      }
+      if (await writeField(field, output, source)) return;
 
       const copied = await copyToClipboard(output, field);
       throw new Error(

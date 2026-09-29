@@ -6,11 +6,13 @@ TransMate-v*-源码.zip
 
 # 临时预览页与截图（temp/preview-ui.cjs 生成）
 temp/preview-ui*.html
-temp/preview-summary*.html
 temp/crops/
 temp/shots/
 temp/relay-worker.mjs
 temp/lint-report.json
+
+# AI 工作记忆：开发过程记录与内部笔记，不进版本库（本地保留）
+.workbuddy-ai/
 
 # 系统 / 编辑器
 .DS_Store

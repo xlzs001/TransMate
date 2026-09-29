@@ -1,7 +1,8 @@
 (() => {
   /* eslint-disable */
   // ===========================================================================
-  // 以下到第 3225 行是第三方库的打包产物（libphonenumber-js + franc），不是我们的代码。
+  // 以下到第 3232 行是第三方库的打包产物（libphonenumber-js 1.13.12 + franc 6.2.0），
+  // 不是我们的代码。版权归各自作者所有，均为 MIT 许可，全文见 THIRD_PARTY_NOTICES.md。
   // 不要手改，升级时整段替换。已用 eslint-disable 从静态检查中排除，
   // 这样 lint 报出来的每一条都真的是我们自己的问题。
   // ===========================================================================
@@ -3272,12 +3273,10 @@
     watChatTranslationBackground: "#eaf2ff",
     watChatTranslationFontSize: 13,
     watHideImmersiveTranslations: true,
-    watChatShortcut: "Alt+Q",
-    // 客户在线状态指示灯：读 WhatsApp 自己的在线状态文案，不额外发任何请求。
-    watPresenceIndicator: true
+    watChatShortcut: "Alt+Q"
   };
   var TRANSLATION_PROFILE_OPTIONS = [
-    ["immersive", "\u6C89\u6D78\u901A\u7528", "\u7ED3\u5408\u4E0A\u4E0B\u6587\uFF0C\u81EA\u7136\u3001\u51C6\u786E\u4E14\u65E0\u673A\u5668\u7FFB\u8BD1\u611F"],
+    ["immersive", "\u81EA\u7136\u901A\u7528", "\u7ED3\u5408\u4E0A\u4E0B\u6587\uFF0C\u81EA\u7136\u3001\u51C6\u786E\u4E14\u65E0\u673A\u5668\u7FFB\u8BD1\u611F"],
     ["literal", "\u5FE0\u5B9E\u76F4\u8BD1", "\u4FDD\u7559\u539F\u53E5\u7ED3\u6784\u3001\u8BED\u6C14\u3001\u6570\u5B57\u548C\u672F\u8BED"],
     ["paraphrase", "\u610F\u8BD1\u6DA6\u8272", "\u5728\u4E0D\u6539\u53D8\u4E8B\u5B9E\u7684\u524D\u63D0\u4E0B\u4F18\u5316\u6BCD\u8BED\u8868\u8FBE"],
     ["friend-casual", "\u81EA\u7136\u804A\u5929", "\u65E5\u5E38\u3001\u7B80\u77ED\u3001\u81EA\u7136\u7684\u670B\u53CB\u804A\u5929\u8BED\u6C14"],
@@ -3479,6 +3478,10 @@
   var chatTranslationActive = 0;
   var chatTranslationFingerprint = "";
   var chatTranslationSessionActive = false;
+  // 本次会话是给哪个联系人开的。WhatsApp 是单页应用，切换联系人不会重新加载页面，
+  // 所以必须自己盯着标题变化 —— 否则在客户 A 按一次 Alt+Q，切到客户 B 之后
+  // B 的消息会继续被自动翻译，用户在毫不知情的情况下一直消耗额度。
+  var chatTranslationSessionTitle = "";
   var chatTranslationQueue = [];
   var chatTranslationPending = /* @__PURE__ */ new Set();
   var chatTranslationWaiters = /* @__PURE__ */ new Map();
@@ -3583,41 +3586,48 @@
     for (const attribute of attributes) values.push(element.getAttribute?.(attribute));
     return values.filter(Boolean);
   }
-  function findPhoneInHeader(header) {
-    for (const value of valuesFromElement(header)) {
-      const phone = normalizePhone(value);
-      if (phone) return phone;
-    }
-    for (const element of header.querySelectorAll("[title], [aria-label], [data-id], [data-jid], [data-chat-id], [data-phone], [data-phone-number], [href]")) {
-      for (const value of valuesFromElement(element)) {
+  // 选择器提出来当常量：原来每次调用都要重新拼一遍（元数据那条还要 join 十个选择器），
+  // 而这个模块在每次页面 DOM 变化后都会跑。
+  var PHONE_ATTRIBUTE_SELECTOR = "[title], [aria-label], [data-id], [data-jid], [data-chat-id], [data-phone], [data-phone-number], [href]";
+  var PHONE_METADATA_SELECTOR = [
+    '[data-jid*="@c.us"]',
+    '[data-jid*="@s.whatsapp.net"]',
+    '[data-chat-id*="@c.us"]',
+    '[data-chat-id*="@s.whatsapp.net"]',
+    '[data-id*="@c.us"]',
+    '[data-id*="@s.whatsapp.net"]',
+    "[data-phone]",
+    "[data-phone-number]",
+    'a[href*="wa.me/"]',
+    'a[href*="phone="]'
+  ].join(",");
+
+  /**
+   * 从一批候选元素里取第一个能解析成号码的值。
+   *
+   * 三处查找（标题栏 / 会话元数据 / 可见联系人面板）的循环原本各写了一遍，
+   * 只差"候选元素怎么来"。抽出来之后，号码解析规则只需改一个地方 ——
+   * 原来想调整 normalizePhone 的用法得同步改三处，漏一处就是"某个入口认不出号码"。
+   */
+  function firstPhoneFrom(candidates, valuesOf = valuesFromElement) {
+    for (const element of candidates) {
+      for (const value of valuesOf(element)) {
         const phone = normalizePhone(value);
         if (phone) return phone;
       }
     }
     return null;
   }
+  function findPhoneInHeader(header) {
+    // header 可能还没渲染出来。原来这里少一个判空，header 为 null 时
+    // 会在 querySelectorAll 上直接抛 TypeError。
+    if (!header) return null;
+    return firstPhoneFrom([header]) || firstPhoneFrom(header.querySelectorAll(PHONE_ATTRIBUTE_SELECTOR));
+  }
   function findPhoneInChatMetadata() {
     const main = document.querySelector("#main");
     if (!main) return null;
-    const selectors = [
-      '[data-jid*="@c.us"]',
-      '[data-jid*="@s.whatsapp.net"]',
-      '[data-chat-id*="@c.us"]',
-      '[data-chat-id*="@s.whatsapp.net"]',
-      '[data-id*="@c.us"]',
-      '[data-id*="@s.whatsapp.net"]',
-      "[data-phone]",
-      "[data-phone-number]",
-      'a[href*="wa.me/"]',
-      'a[href*="phone="]'
-    ];
-    for (const element of main.querySelectorAll(selectors.join(","))) {
-      for (const value of valuesFromElement(element)) {
-        const phone = normalizePhone(value);
-        if (phone) return phone;
-      }
-    }
-    return null;
+    return firstPhoneFrom(main.querySelectorAll(PHONE_METADATA_SELECTOR));
   }
   function publishCurrent(payload) {
     if (stopped) return;
@@ -3628,12 +3638,16 @@
     }
   }
   function findPhoneInVisibleContactPanel() {
-    const spans = [...document.querySelectorAll("span, a")];
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-    for (const element of spans) {
+    const elements = document.querySelectorAll("span, a");
+    for (const element of elements) {
       if (element.closest("#main") || element.closest(`#${ROOT_ID}`)) continue;
       const directText = cleanText(element.textContent);
       if (!directText || directText.length > 35) continue;
+      // 先做一次零成本的数字预筛，再去问布局。
+      // getBoundingClientRect() 会强制同步布局，在 WhatsApp 这种上千个 span 的页面上
+      // 逐个问一遍是实打实的开销；而号码至少要有 7 位数字，绝大多数元素过不了这一关。
+      if (directText.replace(/\D/g, "").length < 7) continue;
       const rect = element.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0 || rect.left < viewportWidth * 0.48) continue;
       const phone = normalizePhone(directText);
@@ -3641,10 +3655,28 @@
     }
     return null;
   }
+
+  // 号码扫描要遍历整个页面（还带强制布局），但只有"换了联系人"时才需要重跑。
+  // 同一个联系人期间那些 180ms 一次的定时刷新，直接复用上次结果。
+  //
+  // 只缓存"找到了"的结果：没找到时不缓存 —— 否则用户后来点开联系人面板
+  // 把号码露出来了，我们却因为记着"上次没有"而永远看不到。
+  var phoneScanKey = "";
+  var phoneScanResult = null;
   function getPhone(header) {
-    return findPhoneInHeader(header) || findPhoneInChatMetadata() || findPhoneInVisibleContactPanel() || normalizePhone(window.location.href);
+    const title = getContactTitle(header);
+    if (phoneScanResult && title === phoneScanKey) return phoneScanResult;
+    const found = findPhoneInHeader(header)
+      || findPhoneInChatMetadata()
+      || findPhoneInVisibleContactPanel()
+      || normalizePhone(window.location.href);
+    phoneScanKey = found ? title : "";
+    phoneScanResult = found || null;
+    return found;
   }
-  function isImmersiveTranslationNode(element, boundary) {
+  // 判断节点是不是"第三方翻译插件注入的译文"。除了本扩展自己打的标记，
+  // 还要认第三方插件的容器类名，否则读原文时会读到别人插进来的译文。
+  function isThirdPartyTranslationNode(element, boundary) {
     let current = element?.nodeType === Node.ELEMENT_NODE ? element : element?.parentElement;
     while (current) {
       const classes = cleanText(current.getAttribute?.("class"));
@@ -3655,13 +3687,13 @@
     return false;
   }
   function readOriginalMessageText(root, boundary) {
-    if (!root || isImmersiveTranslationNode(root, boundary)) return "";
+    if (!root || isThirdPartyTranslationNode(root, boundary)) return "";
     const pieces = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
       const node = walker.currentNode;
       const parent = node.parentElement;
-      if (!parent || isImmersiveTranslationNode(parent, boundary)) continue;
+      if (!parent || isThirdPartyTranslationNode(parent, boundary)) continue;
       if (parent.closest('[aria-hidden="true"], [hidden], script, style')) continue;
       const text = cleanText(node.textContent);
       if (text) pieces.push(text);
@@ -3707,7 +3739,7 @@
     while (walker.nextNode()) {
       const node = walker.currentNode;
       const parent = node.parentElement;
-      if (!parent || isImmersiveTranslationNode(parent, boundary)) continue;
+      if (!parent || isThirdPartyTranslationNode(parent, boundary)) continue;
       if (isQuotedMessageContextNode(parent, boundary) || isMessageMetadataNode(parent, boundary)) continue;
       if (parent.closest('[aria-hidden="true"], [hidden], script, style')) continue;
       const text = cleanText(node.textContent);
@@ -3799,7 +3831,7 @@
       return {
         node,
         text: readOriginalMessageText(node, message),
-        isTranslation: isImmersiveTranslationNode(node, message),
+        isTranslation: isThirdPartyTranslationNode(node, message),
         isQuoted: isQuotedMessageContextNode(node, message),
         isMetadata: isMessageMetadataNode(node, message),
         isInteractive: Boolean(interactive && interactive !== message && scope.contains(interactive))
@@ -3825,7 +3857,10 @@
     const normalizedTarget = String(targetCode || "zh-CN");
     const targetBase = normalizedTarget.split("-")[0];
     const detected = detectSingleLanguage(text);
-    if (targetBase === "zh" && normalizedTarget.includes("-")) return false;
+    // 只有繁体目标（zh-TW）需要把简体原文转过去，这时不能跳过。
+    // 这里原来写的是"目标带 - 就不跳过"，可默认目标 zh-CN 也带 -，
+    // 于是中文原文永远被送去翻译：白花额度，聊天区还会多出一行重复译文。
+    if (/^zh-(?:tw|hk|mo|hant)\b/i.test(normalizedTarget)) return false;
     return Boolean(detected && detected.code === targetBase && detected.confidence >= 78);
   }
   function clearChatTranslationDom(main = document.querySelector("#main"), removeTranslations = true) {
@@ -3835,7 +3870,7 @@
     if (removeTranslations) {
       main.querySelectorAll('[data-tlp-chat-translation="1"]').forEach((node) => node.remove());
     }
-    main.classList.remove("tlp-hide-immersive");
+    main.classList.remove("tlp-hide-third-party");
     delete main.dataset.tlpChatMode;
     delete main.dataset.tlpChatStyle;
   }
@@ -3881,6 +3916,7 @@
   }
   function deactivateChatTranslation() {
     chatTranslationSessionActive = false;
+    chatTranslationSessionTitle = "";
     chatTranslationGeneration += 1;
     chatTranslationFingerprint = "inactive";
     chatTranslationQueue.length = 0;
@@ -3911,7 +3947,7 @@
     }
     main.dataset.tlpChatMode = config.watChatTranslationMode || "bilingual";
     main.dataset.tlpChatStyle = config.watChatTranslationStyle || "plain";
-    main.classList.toggle("tlp-hide-immersive", config.watHideImmersiveTranslations !== false);
+    main.classList.toggle("tlp-hide-third-party", config.watHideImmersiveTranslations !== false);
     main.style.setProperty("--tlp-chat-translation-color", config.watChatTranslationTextColor || "#0b57d0");
     main.style.setProperty("--tlp-chat-translation-bg", config.watChatTranslationBackground || "#eaf2ff");
     main.style.setProperty("--tlp-chat-translation-size", `${clamp(config.watChatTranslationFontSize, 10, 22)}px`);
@@ -3923,9 +3959,8 @@
     while (chatTranslationCache.size > 300) chatTranslationCache.delete(chatTranslationCache.keys().next().value);
   }
   function insertChatTranslation(record, payload, generation) {
-    // payload 既可能是纯文本，也可能是 { text, warnings }。
+    // payload 既可能是纯文本，也可能是 { text }。
     const translation = typeof payload === "string" ? payload : String(payload?.text || "");
-    const warnings = Array.isArray(payload?.warnings) ? payload.warnings : [];
     removeMessageProgress(record.message, record.textHash);
     if (stopped || generation !== chatTranslationGeneration || !record.message.isConnected || !chatTranslationSessionActive || activeConfig.watChatTranslationEnabled !== true || activeConfig.watChatTranslationTarget !== record.targetCode) return;
     const current = extractChatMessage(record.message);
@@ -3941,15 +3976,6 @@
     element.dir = "auto";
     element.title = "\u7531 TransMate \u7FFB\u8BD1";
     element.textContent = translation;
-    // 校验提示挂在译文元素"内部"：这样 MutationObserver 看到的仍然只是"新增了一个译文节点"，
-    // 已有的过滤规则就能覆盖它。若把提示做成同级节点，必须同步给它加一条过滤，
-    // 漏加就会让每次插入提示都触发一次重渲染，形成死循环。
-    if (warnings.length) {
-      const warning = document.createElement("span");
-      warning.className = "tlp-chat-translation-warning";
-      warning.textContent = `\u8BF7\u6838\u5BF9\uFF1A${warnings.map((item) => item?.message).filter(Boolean).join("\uFF1B")}`;
-      element.appendChild(warning);
-    }
     if (current.anchor?.insertAdjacentElement) current.anchor.insertAdjacentElement("afterend", element);
     else current.scope.appendChild(element);
   }
@@ -3976,7 +4002,7 @@
         if (!response?.ok) throw new Error(response?.error || "\u804A\u5929\u7FFB\u8BD1\u5931\u8D25");
         const translated = new Map((response.items || []).map((item) => [
           String(item.id),
-          { text: String(item.text || "").trim(), warnings: Array.isArray(item.warnings) ? item.warnings : [] }
+          { text: String(item.text || "").trim() }
         ]));
         for (const job of jobs) {
           const payload = translated.get(job.pendingKey);
@@ -4268,137 +4294,6 @@
     }
     return timeFormatters.get(timezone).format(/* @__PURE__ */ new Date());
   }
-  // ---------------------------------------------------------------------------
-  // 客户在线状态指示灯
-  //
-  // WhatsApp 自己就在标题下方显示"在线 / 最后上线时间 …"，这里只是把它读出来，
-  // 用一个绿点 / 灰点让业务员一眼扫到。不额外发任何请求，也不消耗任何额度。
-  //
-  // 边界：能看到的只有 WhatsApp 自己愿意公开的状态。对方把"最后上线"设为
-  // 仅联系人可见或完全隐藏时，WhatsApp 页面上就不显示，这里也就没有状态可读——
-  // 这时指示灯自动收起，不会假装"离线"。
-  // ---------------------------------------------------------------------------
-  var PRESENCE_OFFLINE_PATTERN = /(最后上线|last seen|был|в последний раз|última vez|最后一次)/i;
-  var PRESENCE_ONLINE_PATTERN = /(^|[\s（(])(在线|online|в сети|на связи|オンライン|온라인|متصل)([\s）)]|$)/i;
-  var PRESENCE_TYPING_PATTERN = /(正在输入|typing|печатает|escribiendo|입력 중)/i;
-  var presenceKey = "";
-  var lastPresenceOnline = null;
-  var presenceFlashUntil = 0;
-
-  function isOnlinePresence(text) {
-    const value = cleanText(text);
-    if (!value) return false;
-    // "正在输入"是比"在线"更明确的信号，优先认它。
-    if (PRESENCE_TYPING_PATTERN.test(value)) return true;
-    // 注意"最后上线时间"里也含"上线"，必须先排掉离线文案再判在线。
-    if (PRESENCE_OFFLINE_PATTERN.test(value)) return false;
-    return PRESENCE_ONLINE_PATTERN.test(value);
-  }
-
-  /**
-   * 只采用"认得出是状态文案"的文本。
-   *
-   * 为什么必须校验：状态行附近夹着图标元素和页面自己的提示文案，它们都不是客户状态。
-   * 实测踩到的例子：WhatsApp 的图标字体把连字名当成文本渲染，
-   * 于是面板上原样显示了一串 "ic-person-filled"，看起来像乱码。
-   * 宁可不显示 —— 与"读不到就收起、不假装离线"是同一个取向。
-   */
-  function looksLikePresenceText(text) {
-    const value = cleanText(text);
-    if (!value) return false;
-    return PRESENCE_TYPING_PATTERN.test(value)
-      || PRESENCE_OFFLINE_PATTERN.test(value)
-      || PRESENCE_ONLINE_PATTERN.test(value);
-  }
-
-  /** 图标 / 装饰元素：它们身上没有状态文案，跳过继续往后找。 */
-  function isIconLike(element) {
-    if (!element) return true;
-    if (element.closest && element.closest("svg, img, i, picture")) return true;
-    if (element.getAttribute && element.getAttribute("aria-hidden") === "true") return true;
-    const className = typeof element.className === "string" ? element.className : "";
-    return /(^|[\s_-])ic[_-]/i.test(className);
-  }
-
-  /** 找标题下方那一行状态文案（"在线" / "最后上线时间 …"）所在的元素。 */
-  function getPresenceElement(header) {
-    if (!header) return null;
-    const preferred = header.querySelector(
-      '[data-testid="conversation-info-header-chat-subtitle"], [data-testid="conversation-info-header-subtitle"]'
-    );
-    if (preferred && !preferred.closest(`#${ROOT_ID}`)) return preferred;
-    const title = header.querySelector(
-      '[data-testid="conversation-info-header-chat-title"], span[dir="auto"][title]'
-    );
-    if (!title) return null;
-    let infoArea = title;
-    while (infoArea.parentElement && infoArea.parentElement !== header) infoArea = infoArea.parentElement;
-    const scope = infoArea || header;
-    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      const parent = node.parentElement;
-      if (!parent || title.contains(parent) || parent.closest(`#${ROOT_ID}`)) continue;
-      // 图标元素先跳过：它的文本是图标名，不是状态文案。
-      if (isIconLike(parent)) continue;
-      if (cleanText(node.textContent)) return parent;
-    }
-    return null;
-  }
-
-  function detectPresence(header) {
-    const element = getPresenceElement(header);
-    if (!element) return null;
-    // WhatsApp 把完整文案放在 title 上，页面上显示的那份可能被截断。
-    const text = cleanText(element.getAttribute("title") || element.textContent);
-    // 认不出来的文本一律当作"读不到"：宁可收起指示灯，也不要显示一串内部标识。
-    if (!looksLikePresenceText(text)) return null;
-    return { online: isOnlinePresence(text), text };
-  }
-
-  function renderPresence(root, title) {
-    const marker = root.querySelector(".wat-presence");
-    const detail = root.querySelector(".wat-presence-hint");
-    const toggle = root.querySelector(".wat-presence-toggle");
-    if (!marker || !detail) return;
-    const enabled = activeConfig.watPresenceIndicator === true;
-    if (toggle) toggle.checked = enabled;
-    const key = String(title || "");
-    if (key !== presenceKey) {
-      // 换联系人时不能沿用上一个人的状态，否则会误闪一下"刚上线"。
-      presenceKey = key;
-      lastPresenceOnline = null;
-    }
-    const presence = enabled ? detectPresence(activeHeader) : null;
-    if (!presence) {
-      marker.hidden = true;
-      marker.removeAttribute("title");
-      delete marker.dataset.state;
-      delete marker.dataset.flash;
-      delete root.dataset.presence;
-      detail.textContent = enabled ? "\u2014" : "\u5DF2\u5173\u95ED";
-      delete detail.dataset.state;
-      lastPresenceOnline = null;
-      return;
-    }
-    marker.hidden = false;
-    marker.dataset.state = presence.online ? "online" : "offline";
-    marker.title = `${presence.online ? "\u5BA2\u6237\u5728\u7EBF" : "\u5BA2\u6237\u79BB\u7EBF"}\uFF1A${presence.text}`;
-    root.dataset.presence = marker.dataset.state;
-    detail.textContent = presence.text;
-    detail.dataset.state = marker.dataset.state;
-    // 离线 → 在线时让灯闪一下。重复赋同一个 data 值不会重播动画，所以先删、强制回流、再设。
-    if (presence.online && lastPresenceOnline === false) {
-      delete marker.dataset.flash;
-      void marker.offsetWidth;
-      marker.dataset.flash = "1";
-      presenceFlashUntil = Date.now() + 6e3;
-    } else if (marker.dataset.flash === "1" && Date.now() > presenceFlashUntil) {
-      delete marker.dataset.flash;
-    }
-    lastPresenceOnline = presence.online;
-  }
-
   function createRoot() {
     const root = document.createElement("div");
     root.id = ROOT_ID;
@@ -4408,7 +4303,6 @@
       <span class="wat-region">\u8BC6\u522B\u4E2D</span>
       <span class="wat-time-label">\u5F53\u5730\u65F6\u95F4\uFF1A</span>
       <span class="wat-time">--:--</span>
-      <span class="wat-presence" hidden></span>
     </button>
     <div id="wat-region-time-popover" class="wat-popover" role="dialog" aria-label="\u5BA2\u6237\u5730\u533A\u3001\u65F6\u95F4\u4E0E\u8BED\u8A00\u8BBE\u7F6E" hidden>
       <div class="wat-popover-header">
@@ -4417,11 +4311,6 @@
       </div>
       <div class="wat-detail-row"><span>\u53F7\u7801</span><strong class="wat-phone">\u672A\u8BC6\u522B</strong></div>
       <div class="wat-detail-row"><span>\u5730\u533A</span><strong class="wat-detail-region">\u2014</strong></div>
-      <div class="wat-detail-row wat-presence-row">
-        <span>\u72B6\u6001</span>
-        <strong class="wat-presence-hint">\u2014</strong>
-        <label class="wat-toggle" title="\u663E\u793A\u5BA2\u6237\u5728\u7EBF\u72B6\u6001\u6307\u793A\u706F"><input class="wat-presence-toggle" type="checkbox" role="switch" aria-label="\u5BA2\u6237\u5728\u7EBF\u72B6\u6001\u6307\u793A\u706F" /><i></i></label>
-      </div>
       <label class="wat-detail-row"><span>\u5BA2\u6237\u8BED\u8A00</span><select class="wat-language"></select></label>
       <label class="wat-detail-row wat-profile-row">
         <span>AI \u7FFB\u8BD1\u4E13\u5BB6</span>
@@ -4478,11 +4367,6 @@
     root.querySelector(".wat-manual-phone").addEventListener("input", (event) => {
       event.target.classList.remove("wat-invalid");
       event.target.dataset.dirty = "true";
-    });
-    // 快捷开关直接写在信息行旁边：改完立刻生效，不用再跑去设置页。
-    // 存储键与设置页共用，写回后 storage.onChanged 会触发一次重渲染。
-    root.querySelector(".wat-presence-toggle").addEventListener("change", (event) => {
-      safeStorageSet({ watPresenceIndicator: event.target.checked });
     });
     installDragBehavior(root, summary);
     return root;
@@ -4658,8 +4542,12 @@
         else header.appendChild(root);
       }
     } else if (config.watPosition === "header") {
+      // 位置没变就别动 DOM。insertBefore 会先把已连接的节点摘下来再插回去，
+      // 即使落点完全相同也会产生一条 childList mutation；而 MutationObserver
+      // 观察的是 documentElement，这条 mutation 的 target 是 header（root 的父级），
+      // 过滤器匹配不到，于是被判成"页面变了" → 再跑一次 update → 死循环。
       const actionArea = [...header.children].reverse().find((child) => child !== root && child.querySelector("button, [role='button']"));
-      if (actionArea) header.insertBefore(root, actionArea);
+      if (actionArea && root.nextElementSibling !== actionArea) header.insertBefore(root, actionArea);
     }
     applyAppearance(root, config);
     if (config.watPosition === "status-line") positionOnStatusLine(root, header);
@@ -4723,13 +4611,12 @@
     input.classList.remove("wat-invalid");
     input.removeAttribute("title");
     delete input.dataset.dirty;
-    const result2 = await safeStorageGet({ [STORAGE.contactMap]: {}, [STORAGE.manualPhones]: {} });
+    // 只写 manualPhones。contactMap 是"页面自动识别到的值"的缓存，两者职责不同：
+    // 手动值混进 contactMap，下一轮自动识别就会拿它当"缓存值"比来比去，容易互相冲掉。
+    const result2 = await safeStorageGet(STORAGE.manualPhones);
     if (!result2) return;
-    const contactMap = { ...result2[STORAGE.contactMap] || {}, [activeState.title]: phone };
-    const manualPhones = { ...result2[STORAGE.manualPhones] || {}, [activeState.title]: phone };
     await safeStorageSet({
-      [STORAGE.contactMap]: contactMap,
-      [STORAGE.manualPhones]: manualPhones
+      [STORAGE.manualPhones]: { ...result2[STORAGE.manualPhones] || {}, [activeState.title]: phone }
     });
     scheduleUpdate(0);
   }
@@ -4754,7 +4641,6 @@
     root.dataset.state = "unknown";
     root.querySelector(".wat-region").textContent = "\u5730\u533A\u672A\u8BC6\u522B";
     root.querySelector(".wat-time").textContent = "\u70B9\u51FB\u8BBE\u7F6E";
-    renderPresence(root, title);
     root.querySelector(".wat-phone").textContent = "\u672A\u4ECE\u9875\u9762\u53D6\u5F97\u53F7\u7801";
     root.querySelector(".wat-phone").removeAttribute("title");
     root.querySelector(".wat-popover-contact").textContent = title;
@@ -4788,7 +4674,6 @@
     root.dataset.state = "known";
     root.querySelector(".wat-region").textContent = state.region;
     root.querySelector(".wat-time").textContent = formatLocalTime(state.timezone);
-    renderPresence(root, state.title);
     root.querySelector(".wat-phone").textContent = state.phone;
     root.querySelector(".wat-phone").title = state.phone;
     root.querySelector(".wat-popover-contact").textContent = state.title;
@@ -4827,6 +4712,7 @@
     const stored = await safeStorageGet({
       ...DISPLAY_DEFAULTS,
       [STORAGE.contactMap]: {},
+      [STORAGE.manualPhones]: {},
       [STORAGE.languageCache]: {},
       [STORAGE.languageOverrides]: {},
       [STORAGE.overrides]: {}
@@ -4867,8 +4753,11 @@
     const title = getContactTitle(header);
     const freshLanguage = detectCustomerLanguage(getRecentIncomingMessages());
     const detectedPhone = getPhone(header);
+    // 手动填写的号码优先级最高：它是用户对着真实客户核对过的，页面扫描只是猜测。
+    // 让猜测压过人工确认，那个输入框就等于摆设 —— 用户改完还是看到错的号码。
+    const manualPhone = stored[STORAGE.manualPhones]?.[title] || "";
     const cachedPhone = stored[STORAGE.contactMap]?.[title];
-    const phone = detectedPhone || cachedPhone || null;
+    const phone = manualPhone || detectedPhone || cachedPhone || null;
     // 号码识别不出来时退回用标题当键，保证同一联系人前后两次用的是同一个键。
     const languageKey = phone || title;
     const cachedLanguage = stored[STORAGE.languageCache]?.[languageKey] || null;
@@ -4882,7 +4771,9 @@
         [STORAGE.languageCache]: { ...stored[STORAGE.languageCache] || {}, [languageKey]: freshLanguage }
       });
     }
-    if (detectedPhone && cachedPhone !== detectedPhone) {
+    // 自动识别值只写进 contactMap，而且**绝不覆盖手动值**：
+    // 否则用户刚改对的号码会在下一次渲染时被扫描结果冲掉，看起来像"改了没用"。
+    if (detectedPhone && !manualPhone && cachedPhone !== detectedPhone) {
       safeStorageSet({
         [STORAGE.contactMap]: { ...stored[STORAGE.contactMap] || {}, [title]: detectedPhone }
       });
@@ -4950,6 +4841,12 @@
     const stored = await loadActiveConfig(generation);
     if (!stored) return;
 
+    // 换联系人就结束聊天翻译会话。必须在 syncChatTranslation() **之前**判断：
+    // 那个函数会立刻排一次翻译，判断晚一步就等于先替新联系人翻了一轮再取消。
+    if (chatTranslationSessionActive && getContactTitle(header) !== chatTranslationSessionTitle) {
+      deactivateChatTranslation();
+    }
+
     syncChatTranslation();
 
     if (stored[STORAGE.enabled] === false) {
@@ -4991,6 +4888,7 @@
       return;
     }
     chatTranslationSessionActive = true;
+    chatTranslationSessionTitle = activeState?.title || "";
     chatTranslationFailures.clear();
     try {
       translateVisibleChat(activeConfig);
@@ -5034,7 +4932,6 @@
     if (root && activeState?.timezone) {
       root.querySelector(".wat-time").textContent = formatLocalTime(activeState.timezone);
     }
-    if (root) renderPresence(root, activeState?.title);
     if (activeHeader && !activeHeader.isConnected) scheduleUpdate(0);
   }, 15e3);
   scheduleUpdate(0);

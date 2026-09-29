@@ -115,45 +115,6 @@
   color: color-mix(in srgb, var(--wat-text) 48%, transparent);
 }
 
-/* 客户在线状态灯：只读 WhatsApp 自己显示的状态文案，不额外发请求。
-   在线实心绿点，离线灰点，读不到状态时整个收起（不假装离线）。
-   排在摘要条最右侧 —— 它是"扫一眼"用的信息，放在时间之后不打断读时间；
-   左边多留一点间距，免得被当成时间的一部分。 */
-#wat-region-time-root .wat-presence {
-  flex: none;
-  width: calc(8px * var(--wat-scale));
-  height: calc(8px * var(--wat-scale));
-  margin-left: calc(2px * var(--wat-scale));
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--wat-text) 34%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wat-text) 26%, transparent);
-  transition: background 160ms ease;
-  cursor: help;
-}
-
-#wat-region-time-root .wat-presence[data-state="online"] {
-  background: #25d366;
-  box-shadow: 0 0 0 calc(2.5px * var(--wat-scale)) rgba(37, 211, 102, .22);
-}
-
-#wat-region-time-root .wat-presence[data-flash="1"] {
-  animation: wat-presence-flash 900ms ease-out 4;
-}
-
-@keyframes wat-presence-flash {
-  0%, 100% { transform: scale(1); }
-  35% { transform: scale(1.8); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  #wat-region-time-root .wat-presence[data-flash="1"] { animation: none; }
-}
-
-#wat-region-time-root[data-position="status-line"] .wat-presence {
-  width: 7px;
-  height: 7px;
-}
-
 #wat-region-time-root .wat-popover {
   position: absolute;
   top: calc(100% + 9px);
@@ -262,100 +223,6 @@
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* 状态行文案较长要换行，且末尾带一个快捷开关，所以是"标签 + 值 + 开关"三列。 */
-#wat-region-time-root .wat-presence-row {
-  grid-template-columns: 78px minmax(0, 1fr) auto;
-  align-items: start;
-}
-
-#wat-region-time-root .wat-presence-row .wat-presence-hint {
-  overflow: visible;
-  white-space: normal;
-  text-overflow: clip;
-  font-weight: 500;
-  line-height: 1.45;
-  color: #667781;
-}
-
-#wat-region-time-root .wat-presence-row .wat-presence-hint[data-state="online"] {
-  color: #128c4a;
-  font-weight: 650;
-}
-
-/* 弹层里的快捷开关。这里有两个必须注意的点，都踩过：
-   ① 选择器要带上 #wat-region-time-root。下面那条给文本框 / 下拉用的通用规则写的是
-      `#wat-region-time-root input`（ID 选择器），优先级高于 `.wat-toggle input`，
-      会把 height 改成 34px、再加上 1px 边框和 9px 内边距。原生 checkbox 虽然
-      opacity: 0 看不见，但可点击区域比视觉开关高出一截 —— 点到开关下方也会切换。
-   ② 滑块用绝对定位，不要用 margin。`i::after` 是块级盒子，它的上外边距会和父级
-      `i` 发生外边距合并，把滑块整体顶到轨道顶部：看起来偏上、不居中，开关像是坏的。 */
-#wat-region-time-root .wat-toggle {
-  position: relative;
-  display: inline-block;
-  flex: none;
-  width: 30px;
-  height: 18px;
-  margin-top: 1px;
-  cursor: pointer;
-}
-
-#wat-region-time-root .wat-toggle input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  box-shadow: none;
-  appearance: none;
-  opacity: 0;
-  cursor: pointer;
-}
-
-#wat-region-time-root .wat-toggle input:focus {
-  border-color: transparent;
-  box-shadow: none;
-}
-
-#wat-region-time-root .wat-toggle i {
-  position: relative;
-  display: block;
-  width: 30px;
-  height: 18px;
-  border-radius: 9px;
-  background: #c7d1d6;
-  transition: background 150ms ease;
-}
-
-#wat-region-time-root .wat-toggle i::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(11, 20, 26, .32);
-  transition: transform 150ms ease;
-}
-
-#wat-region-time-root .wat-toggle input:checked + i {
-  background: #008069;
-}
-
-#wat-region-time-root .wat-toggle input:checked + i::after {
-  transform: translateX(12px);
-}
-
-#wat-region-time-root .wat-toggle input:focus-visible + i {
-  outline: 2px solid color-mix(in srgb, var(--wat-accent) 60%, transparent);
-  outline-offset: 2px;
 }
 
 #wat-region-time-root select,
@@ -507,29 +374,9 @@ html[dir="rtl"] #wat-region-time-root .wat-popover {
   border-top: 1px dashed color-mix(in srgb, var(--tlp-chat-translation-color, #0b57d0) 55%, transparent);
 }
 
-/* 硬信息校验提示：挂在译文元素内部，所以用 block 单独占一行。 */
-#main .tlp-chat-translation-warning {
-  display: block;
-  margin-top: 3px;
-  padding: 3px 6px;
-  border-radius: 5px;
-  background: rgba(180, 83, 9, .12);
-  border-left: 2px solid #b45309;
-  color: #92400e;
-  font-size: 11.5px;
-  line-height: 1.4;
-  font-weight: 500;
-}
-
-@media (prefers-color-scheme: dark) {
-  #main .tlp-chat-translation-warning {
-    background: rgba(251, 191, 36, .16);
-    border-left-color: #fbbf24;
-    color: #fcd34d;
-  }
-}
-
-#main.tlp-hide-immersive [class~="immersive-translate-target-inner"],
-#main.tlp-hide-immersive [class*="immersive-translate-target-translation"] {
+/* 屏蔽第三方翻译插件注入的译文。右侧的两个类名是对方注入节点自带的，
+   必须原样匹配，不能改名，否则隐藏失效。 */
+#main.tlp-hide-third-party [class~="immersive-translate-target-inner"],
+#main.tlp-hide-third-party [class*="immersive-translate-target-translation"] {
   display: none !important;
 }

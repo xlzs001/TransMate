@@ -23,7 +23,6 @@ const FILES = [
   'providers.js',
   'options.js',
   'popup.js',
-  'verify.js',
   'timezone.js'
 ];
 
@@ -101,12 +100,37 @@ function findTopLevelWrappers(ast) {
 
 function analyze(file) {
   const { lines, skip, vendored } = loadSource(file);
-  const ast = acorn.parse(lines.join('\n'), {
+  const source = lines.join('\n');
+  const comments = [];
+  const ast = acorn.parse(source, {
     ecmaVersion: 2023,
     sourceType: 'script',
     locations: true,
-    allowReturnOutsideFunction: true
+    allowReturnOutsideFunction: true,
+    onComment: (block, text, start, end) => comments.push({ start, end })
   });
+
+  // 函数长度只数"真正有代码的行"：整行注释和空行都不算。
+  //
+  // 为什么必须这样：工程规范要求"注释写为什么"，而"为什么"往往要写好几行。
+  // 如果注释也算长度，这两条规则就会直接打架 —— 注释写得越认真，函数越容易超标，
+  // 最后所有人都会学会"少写注释来把数字压下去"。那是拿指标换可维护性，方向反了。
+  //
+  // 注意用 split('') 而不是 [...source]：acorn 的偏移量是按 UTF-16 码元算的，
+  // 展开成码点会让含 emoji / 生僻字的文件整体错位。
+  const chars = source.split('');
+  for (const { start, end } of comments) {
+    for (let index = start; index < end; index += 1) {
+      if (chars[index] !== '\n') chars[index] = ' ';
+    }
+  }
+  const codeOnlyLines = chars.join('').split('\n');
+  const hasCode = index => Boolean(codeOnlyLines[index] && codeOnlyLines[index].trim());
+  const countCodeLines = (startLine, endLine) => {
+    let total = 0;
+    for (let index = startLine - 1; index < endLine; index += 1) if (hasCode(index)) total += 1;
+    return total;
+  };
 
   const wrappers = findTopLevelWrappers(ast);
   const functions = [];
@@ -155,7 +179,7 @@ function analyze(file) {
       functions.push({
         name,
         line: startLine,
-        length: endLine - startLine + 1,
+        length: countCodeLines(startLine, endLine),
         complexity: branches,
         depth: innerDepth
       });

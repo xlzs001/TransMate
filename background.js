@@ -1,15 +1,16 @@
 
 importScripts("providers.js");
-importScripts("verify.js");
-
-const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 
 async function getCfg() {
   const settings = await chrome.storage.local.get({
     provider: "",
     providerConfigs: {},
     apiKey: "",
-    model: DEFAULT_MODEL,
+    // 刻意不给 model 兜底成某个具体模型名。
+    // 模型的唯一来源是「用户显式保存的 providerConfigs[id].model」→「providers.js 预设」。
+    // 这里再兜一个写死的名字，就等于给 gemini 的默认模型造了第二个真相来源：
+    // 预设升级时改一处、忘一处，线上表现是"有的用户升了、有的没升"，极难查。
+    model: "",
     translationProfile: "immersive",
     customerLanguage: "auto"
   });
@@ -39,8 +40,17 @@ function getProviderConfig(settings, override) {
   const id = settings.provider || "gemini";
   const preset = TLP_PROVIDER_PRESETS[id] || TLP_PROVIDER_PRESETS.gemini;
   const saved = settings.providerConfigs?.[id] || {};
+  // v2.x 把 Gemini 的 Key / 模型镜像到顶层 settings 上，options.js 至今仍在写这个镜像。
+  //
+  // 这一层必须排在 preset **前面**。排在后面（原来的写法）会把预设的默认模型永久压住：
+  // 用户只要保存过一次设置页，顶层 model 就固化成"当时那个模型名"，
+  // 之后 providers.js 升级 gemini 的模型名（比如退役某个版本）就再也传不到他那里，
+  // 他只会看到"模型不存在"，而新装用户却是好的 —— 这种"部分用户中招"最难定位。
+  //
+  // apiKey 放在前面不会丢：gemini 预设里没有这个字段，展开时不会覆盖它，
+  // 所以老用户只有顶层 apiKey 时依然能正常兜底。
   const legacy = id === "gemini" ? { apiKey: settings.apiKey, model: settings.model } : {};
-  return { id, ...preset, ...legacy, ...saved };
+  return { id, ...legacy, ...preset, ...saved };
 }
 
 function requireProviderConfig(provider) {
@@ -70,6 +80,11 @@ async function fetchText(url, options = {}, timeoutMs = 30000) {
 // 服务商报错时经常直接甩回一整页 HTML（Cloudflare 502、网关拦截页、登录页等），
 // 原样塞进错误消息会变成几千字的 toast，把真正的信息淹没，还会撑破弹窗。
 const MAX_ERROR_CHARS = 300;
+
+// 单次翻译的输入上限（字符）。超过就不发请求，直接提示分段。
+// 用法见 translate() 里的预检。
+const MAX_TRANSLATION_INPUT = 8000;
+
 function trimProviderError(value) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (text.length <= MAX_ERROR_CHARS) return text;
@@ -175,6 +190,27 @@ function deepLFormality(profileId, context = "field") {
 }
 
 /**
+ * DeepL 的 formality 只对部分目标语言生效，不支持的语种传了会直接 400，
+ * 整个翻译请求失败 —— 代价远大于"少一个语气选项"。
+ *
+ * 所以这里用**白名单**而不是黑名单：漏加一个语种只是语气退化，
+ * 多加一个语种却会让用户完全翻译不了。要新增语种，先用真实 Key 实测一次再往这里加。
+ * 名单依据 DeepL 官方文档列出的 formality 支持范围。
+ */
+const DEEPL_FORMALITY_TARGETS = new Set([
+  "DE", "FR", "IT", "ES", "NL", "PL", "PT-PT", "PT-BR", "JA", "RU"
+]);
+
+/**
+ * 按"目标语言是否支持"决定要不要发 formality。
+ * 单条翻译和批量翻译原本各写了一遍判断，抽出来避免只改一处导致两边行为漂移。
+ */
+function applyDeepLFormality(body, target, profileId, context) {
+  const formality = deepLFormality(profileId, context);
+  if (formality && DEEPL_FORMALITY_TARGETS.has(target)) body.set("formality", formality);
+}
+
+/**
  * 把项目内的语言码翻成 DeepL 要的目标语言码。
  * 单条翻译和批量翻译原本各写了一遍（含同一句报错文案），
  * 抽出来避免只改了其中一处导致两边行为不一致。
@@ -200,9 +236,28 @@ function deepLRequestInit(provider, body) {
   };
 }
 
-function estimateOutputTokens(text, minimum = 800, maximum = 6000) {
+// 推理模型（gpt-5 / o 系列）的 max_completion_tokens 是"思考 + 正文"合起来算的。
+// 思维链会先把额度吃掉一部分，正文还没翻完就被截断 —— 返回的 finish_reason 是 length，
+// 用户只看到一句"达到长度上限"，而这次请求已经花钱了。
+// 所以推理模型的预算单独抬高：下限翻倍、系数放宽。
+//
+// 这里刻意**不**发 reasoning_effort：它不是 OpenAI 的通用参数，
+// 发给不支持的服务或自建中转会直接 400（多半翻译不了）；
+// 而抬高预算最坏只是稍慢一点。取"漏加只是慢、多加就完全翻译不了"的安全侧。
+const REASONING_MINIMUM_FACTOR = 2;
+const REASONING_LENGTH_FACTOR = 2.2;
+const PLAIN_LENGTH_FACTOR = 1.8;
+
+/**
+ * 估算输出预算。字符数 → token 的粗估：
+ * 英文约 4 字符 1 token、中文约 1 字符 1 token，系数取偏大的一侧。
+ */
+function estimateOutputTokens(text, minimum = 800, maximum = 6000, provider = null) {
+  const reasoning = Boolean(provider) && isReasoningOnlyModel(provider);
+  const factor = reasoning ? REASONING_LENGTH_FACTOR : PLAIN_LENGTH_FACTOR;
+  const floor = reasoning ? minimum * REASONING_MINIMUM_FACTOR : minimum;
   const inputLength = String(text || "").length;
-  return Math.min(maximum, Math.max(minimum, Math.ceil(inputLength * 1.8)));
+  return Math.min(maximum, Math.max(floor, Math.ceil(inputLength * factor)));
 }
 
 // 服务商因安全策略拒答时不会返回任何内容，如果只判断"返回为空"，
@@ -239,10 +294,13 @@ async function callProvider(provider, {
 
   if (provider.adapter === "gemini") {
     const base = String(provider.baseUrl).replace(/\/+$/, "");
-    const url = `${base}/models/${encodeURIComponent(provider.model)}:generateContent?key=${encodeURIComponent(provider.apiKey)}`;
+    // API Key 走请求头，不要拼在 URL 的 ?key= 上。
+    // URL 会进浏览器历史、代理与网络日志，也会随跨域请求的 Referer 带出去；
+    // 请求头不会。Google 官方支持 x-goog-api-key，主机权限不用变。
+    const url = `${base}/models/${encodeURIComponent(provider.model)}:generateContent`;
     const data = await fetchJson(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": provider.apiKey },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature, maxOutputTokens }
@@ -277,10 +335,12 @@ async function callProvider(provider, {
     const target = deepLTargetLanguage(targetCode);
     const url = `${String(provider.baseUrl).replace(/\/+$/, "")}/translate`;
     const body = new URLSearchParams({ text: sourceText, target_lang: target });
-    const formality = deepLFormality(translationProfile, context);
-    if (formality) body.set("formality", formality);
-    const profileContext = translationProfileInstruction(translationProfile, context);
-    if (profileContext) body.set("context", profileContext);
+    applyDeepLFormality(body, target, translationProfile, context);
+    // 这里刻意不设 DeepL 的 `context` 参数。
+    // 它要的是"帮助消歧的上下文文本"（比如上一句原文、产品语境），
+    // 而不是给翻译引擎的系统提示词 —— 原来传的是英文的「Act as a context-aware
+    // native translator…」，语义不对、语言也不对（中译俄时塞一段英文说明），
+    // 既不起作用还可能反过来干扰译文。要恢复这个能力，应当传真实的上下文文本。
     const data = await fetchJson(url, deepLRequestInit(provider, body));
     return data?.translations?.[0]?.text?.trim() || "";
   }
@@ -525,7 +585,7 @@ async function translateGoogleFreeBatch(provider, items, targetCode) {
     results.push(...await Promise.all(group.map(async (item) => {
       try {
         const text = await translateWithGoogleFree(provider, item.text, targetCode);
-        return { id: item.clientId, text: String(text || "").trim(), warnings: TLP_VERIFY.verifyTranslation(item.text, text) };
+        return toChatResult(item, String(text || "").trim());
       } catch (error) {
         return { id: item.clientId, text: "", error };
       }
@@ -534,7 +594,7 @@ async function translateGoogleFreeBatch(provider, items, targetCode) {
 
   const translated = results.filter((item) => item.text);
   if (!translated.length) throw new Error(googleFreeNetworkHint(results[0]?.error));
-  return translated.map(({ id, text, warnings }) => ({ id, text, warnings }));
+  return translated.map(({ id, text }) => ({ id, text }));
 }
 
 const LANGUAGE_NAMES = {
@@ -561,7 +621,7 @@ const TARGET_LANGUAGE_NAMES = {
 
 const TRANSLATION_PROFILES = {
   immersive: {
-    field: "Act as a context-aware native translator in the style of an immersive translation expert. Produce accurate, fluent, idiomatic text with no machine-translated feel. Preserve terminology, structure and formatting when they carry meaning.",
+    field: "Act as a context-aware native translator. Produce accurate, fluent, idiomatic text with no machine-translated feel. Preserve terminology, structure and formatting when they carry meaning.",
     chat: "Act as a context-aware native translator for instant messages. Preserve the sender's intent, relationship, emotion, politeness and conversational rhythm; use natural spoken language and never sound like a formal letter unless the source does."
   },
   adaptive: {
@@ -723,6 +783,18 @@ async function resolveCustomerLanguage(config, tabId) {
 }
 
 async function translate(text, direction, tabId, context = "field") {
+  const source = String(text || "");
+  // 输入预检：超过上限就直接说清楚，不要发出注定失败的请求。
+  // 原来的行为是"先把请求发出去，等服务端回一段 context_length_exceeded 的英文原始报文，
+  // 再整段甩给用户"——钱花掉了，用户还不知道发生了什么。
+  // 上限取 8000：它远高于输入框的实际使用长度（聊天侧超过 5000 字符的消息本来就会跳过），
+  // 又远低于任何模型的上下文窗口，被它拦下的输入基本都是误粘贴的整篇文档。
+  if (source.length > MAX_TRANSLATION_INPUT) {
+    throw new Error(
+      `要翻译的内容有 ${source.length} 个字符，超过单次上限 ${MAX_TRANSLATION_INPUT} 个。请先分段再翻译。`
+    );
+  }
+
   const s = await getCfg();
   const provider = getProviderConfig(s);
   const build = PROMPTS[direction] || PROMPTS.zh2en;
@@ -732,6 +804,9 @@ async function translate(text, direction, tabId, context = "field") {
     : customerLanguage;
   const normalizedContext = context === "chat" ? "chat" : "field";
 
+  // 两条出口（缓存命中 / 新翻译）共用同一套收尾，形状必须一致。
+  const finalize = (value) => ({ text: value, targetLanguage: target.code });
+
   // 重复翻译同一句话时直接命中缓存，省掉整次网络往返。
   const cacheKey = CACHEABLE_ADAPTERS.has(provider.adapter)
     ? translationCacheKey(provider, s, target.code, normalizedContext, text)
@@ -739,7 +814,7 @@ async function translate(text, direction, tabId, context = "field") {
   if (cacheKey) {
     const cached = readTranslationCache(cacheKey);
     if (cached) {
-      return { text: cached, targetLanguage: target.code, cached: true, warnings: TLP_VERIFY.verifyTranslation(text, cached) };
+      return { ...finalize(cached), cached: true };
     }
   }
 
@@ -749,13 +824,13 @@ async function translate(text, direction, tabId, context = "field") {
     prompt,
     sourceText: text,
     targetCode: target.code,
-    maxOutputTokens: estimateOutputTokens(text, 2048, 8000),
+    maxOutputTokens: estimateOutputTokens(text, 2048, 8000, provider),
     translationProfile: s.translationProfile,
     context: normalizedContext
   });
   if (!output) throw new Error(`${provider.label} 没有返回翻译结果`);
   if (cacheKey) writeTranslationCache(cacheKey, output);
-  return { text: output, targetLanguage: target.code, warnings: TLP_VERIFY.verifyTranslation(text, output) };
+  return finalize(output);
 }
 
 function buildChatTranslationPrompt(text, targetName, profileId = "immersive") {
@@ -780,22 +855,6 @@ WhatsApp message:
 ${text}`;
 }
 
-async function translateChat(text, targetCode) {
-  const s = await getCfg();
-  const provider = getProviderConfig(s);
-  const targetName = TARGET_LANGUAGE_NAMES[targetCode] || TARGET_LANGUAGE_NAMES["zh-CN"];
-  const prompt = buildChatTranslationPrompt(text, targetName, s.translationProfile);
-  const output = await callProvider(provider, {
-    prompt,
-    sourceText: text,
-    targetCode,
-    translationProfile: s.translationProfile,
-    context: "chat"
-  });
-  if (!output) throw new Error(`${provider.label} 没有返回翻译结果`);
-  return { text: output, warnings: TLP_VERIFY.verifyTranslation(text, output) };
-}
-
 function parseBatchTranslationOutput(output) {
   let text = String(output || "").trim();
   text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -814,10 +873,12 @@ function parseBatchTranslationOutput(output) {
   const rows = Array.isArray(parsed) ? parsed : parsed?.translations;
   if (!Array.isArray(rows)) throw new Error("批量翻译缺少 translations 数组");
   return rows.map((row) => {
-    if (!row || typeof row !== "object" || typeof row.id !== "string" || typeof row.text !== "string") {
+    if (!row || typeof row !== "object" || typeof row.text !== "string") {
       throw new Error("批量翻译包含无效项目");
     }
-    return { id: row.id, text: row.text.trim() };
+    // 提示词要求 id 是字符串，但模型经常回成数字（"id": 0）。原来按 typeof 判无效
+    // 会连坐整批，12 条消息从 1 次请求退化成 3 次。归一成字符串只丢真正对不上的那条。
+    return { id: String(row.id), text: row.text.trim() };
   });
 }
 
@@ -834,11 +895,12 @@ function normalizeChatBatchItems(items) {
 }
 
 /**
- * 统一的结果形状：客户端 id + 译文 + 硬信息校验警告。
- * 单条、批量、降级重试三条路径必须给出同一个形状，所以集中在这里。
+ * 统一的结果形状：客户端 id + 译文。
+ * 免费接口批量 / DeepL 批量 / AI 批量 / 逐条降级四条路径必须给出同一个形状，
+ * 所以集中在这里 —— 散开各写一遍，就一定会有人漏掉一个字段。
  */
-function withWarnings(item, text) {
-  return { id: item.clientId, text, warnings: TLP_VERIFY.verifyTranslation(item.text, text) };
+function toChatResult(item, text) {
+  return { id: item.clientId, text };
 }
 
 /** 批量翻译的提示词：要求模型原样返回每个 id，并且只输出 JSON。 */
@@ -866,9 +928,13 @@ ${JSON.stringify(payload)}`;
  * 输出预算按"原文总字符数"算，而不是按条数：
  * 三条长消息需要的输出远比十二条短消息多，按条数算会把长批次悄悄卡在几百 token。
  */
-function chatBatchBudget(normalized) {
+function chatBatchBudget(normalized, provider = null) {
   const sourceCharacters = normalized.reduce((sum, item) => sum + item.text.length, 0);
-  return Math.min(8000, Math.max(1200, Math.ceil(sourceCharacters * 1.8)));
+  // 推理模型同样要留出思维链余量，理由见 estimateOutputTokens。
+  const reasoning = Boolean(provider) && isReasoningOnlyModel(provider);
+  const factor = reasoning ? REASONING_LENGTH_FACTOR : PLAIN_LENGTH_FACTOR;
+  const floor = reasoning ? 1200 * REASONING_MINIMUM_FACTOR : 1200;
+  return Math.min(8000, Math.max(floor, Math.ceil(sourceCharacters * factor)));
 }
 
 /** 校验批量返回：每个 id 恰好出现一次、都要有译文，不能重复、不能少、不能是空白。 */
@@ -884,19 +950,20 @@ function assertCompleteBatch(parsed, expectedIds) {
 }
 
 /** DeepL 批量翻译：一次请求带多个 text 字段，译文按顺序返回。 */
-async function translateDeepLBatch(provider, normalized, settings, targetCode, profileInstruction) {
+async function translateDeepLBatch(provider, normalized, settings, targetCode) {
   const target = deepLTargetLanguage(targetCode);
   const body = new URLSearchParams({ target_lang: target });
-  const formality = deepLFormality(settings.translationProfile, "chat");
-  if (formality) body.set("formality", formality);
-  if (profileInstruction) body.set("context", profileInstruction);
+  applyDeepLFormality(body, target, settings.translationProfile, "chat");
   normalized.forEach((item) => body.append("text", item.text));
   const data = await fetchJson(
     `${String(provider.baseUrl).replace(/\/+$/, "")}/translate`,
     deepLRequestInit(provider, body)
   );
   return normalized
-    .map((item, index) => withWarnings(item, String(data?.translations?.[index]?.text || "").trim()))
+    .map((item, index) => toChatResult(
+      item,
+      String(data?.translations?.[index]?.text || "").trim()
+    ))
     .filter((item) => item.text);
 }
 
@@ -915,11 +982,11 @@ async function translateItemsIndividually(provider, normalized, settings, target
           prompt: buildChatTranslationPrompt(item.text, targetName, settings.translationProfile),
           sourceText: item.text,
           targetCode,
-          maxOutputTokens: estimateOutputTokens(item.text, 1000, 4000),
+          maxOutputTokens: estimateOutputTokens(item.text, 1000, 4000, provider),
           translationProfile: settings.translationProfile,
           context: "chat"
         });
-        return withWarnings(item, String(text || "").trim());
+        return toChatResult(item, String(text || "").trim());
       } catch (_) {
         return { id: item.clientId, text: "" };
       }
@@ -950,7 +1017,7 @@ async function translateChatBatch(items, targetCode) {
 
   if (provider.adapter === "deepl") {
     requireProviderConfig(provider);
-    return translateDeepLBatch(provider, normalized, settings, targetCode, profileInstruction);
+    return translateDeepLBatch(provider, normalized, settings, targetCode);
   }
 
   const payload = normalized.map(({ id, text }) => ({ id, text }));
@@ -964,7 +1031,7 @@ async function translateChatBatch(items, targetCode) {
       prompt,
       sourceText: JSON.stringify(payload),
       targetCode,
-      maxOutputTokens: chatBatchBudget(normalized),
+      maxOutputTokens: chatBatchBudget(normalized, provider),
       translationProfile: settings.translationProfile,
       context: "chat"
     });
@@ -978,7 +1045,7 @@ async function translateChatBatch(items, targetCode) {
 
   const byId = new Map(parsed.map((item) => [item.id, item.text]));
   return normalized
-    .map((item) => withWarnings(item, byId.get(item.id) || ""))
+    .map((item) => toChatResult(item, byId.get(item.id) || ""))
     .filter((item) => item.text);
 }
 
@@ -1001,7 +1068,8 @@ async function listProviderModels(provider) {
 
   if (provider.adapter === "gemini") {
     const base = String(provider.baseUrl).replace(/\/+$/, "");
-    const data = await fetchJson(`${base}/models?key=${encodeURIComponent(provider.apiKey)}`);
+    // 同上：Key 走请求头，不拼在 URL 上。
+    const data = await fetchJson(`${base}/models`, { headers: { "x-goog-api-key": provider.apiKey } });
     return (data?.models || [])
       .filter((item) => (!item.supportedGenerationMethods || item.supportedGenerationMethods.includes("generateContent")) && isTextGenerationModel(item))
       .map((item) => String(item.name || "").replace(/^models\//, ""))
@@ -1030,7 +1098,8 @@ async function testProvider(provider) {
   const output = await callProvider(provider, {
     prompt: "Translate the following text into Simplified Chinese. Output only the translation: Connection successful",
     sourceText: "Connection successful",
-    targetCode: "zh-CN"
+    targetCode: "zh-CN",
+    maxOutputTokens: estimateOutputTokens("Connection successful", 2048, 8000, provider)
   });
   if (!output) throw new Error(`${provider.label} 没有返回测试结果`);
   return output;
@@ -1052,13 +1121,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "TL_TRANSLATE") {
     translate(message.text, message.direction, sender.tab?.id, message.context)
-      .then(result => sendResponse({ ok: true, ...result }))
-      .catch(error => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (message?.type === "TL_CHAT_TRANSLATE") {
-    translateChat(message.text, message.targetLanguage || "zh-CN")
       .then(result => sendResponse({ ok: true, ...result }))
       .catch(error => sendResponse({ ok: false, error: error.message }));
     return true;

@@ -15,7 +15,7 @@
         <p>多语言商务翻译与 WhatsApp 客户当地时间</p>
         <small class="author">作者：Mark</small>
       </div>
-      <span class="version">v3.9.9</span>
+      <span class="version">v3.9.13</span>
     </header>
 
     <section class="card intro">
@@ -56,7 +56,7 @@
           <label class="field">
             <span>AI 翻译专家</span>
             <select id="translationProfile" aria-describedby="translationProfileHelp">
-              <option value="immersive">沉浸通用</option>
+              <option value="immersive">自然通用</option>
               <option value="literal">忠实直译</option>
               <option value="paraphrase">自然意译</option>
               <option value="friend-casual">自然聊天</option>
@@ -67,7 +67,7 @@
               <option value="sales">销售沟通</option>
               <option value="warehouse-equipment">仓储设备</option>
             </select>
-            <small id="translationProfileHelp">参考沉浸式翻译 AI 专家策略，按场景优化术语、语气与表达。</small>
+            <small id="translationProfileHelp">按场景优化术语、语气与表达，生成自然、准确且无机器翻译感的译文。</small>
           </label>
           <div class="field span-two">
             <span>API 模型</span>
@@ -154,7 +154,7 @@
           <label class="field">
             <span>显示位置</span>
             <select id="watPosition">
-              <option value="status-line">在线状态后方（孚盟样式，推荐）</option>
+              <option value="status-line">在线状态后方（跟随 WhatsApp 状态行，推荐）</option>
               <option value="header">联系人标题栏右侧</option>
               <option value="top-right">页面右上角</option>
               <option value="top-left">页面左上角</option>
@@ -203,13 +203,6 @@
           </div>
           <p>选择“自定义拖动位置”后，可直接在 WhatsApp 页面拖动标签。</p>
         </div>
-      </div>
-
-      <div class="panel-settings">
-        <label class="check-row">
-          <input id="watPresenceIndicator" type="checkbox" />
-          <span><b>客户在线状态指示灯</b><small>在标签右侧用一个绿点表示客户当前在线、灰点表示离线；客户从离线变为在线时灯会闪几下。状态直接读 WhatsApp 自己显示的那一行，不额外发任何请求，也读不到时不显示。</small></span>
-        </label>
       </div>
     </section>
 
@@ -270,7 +263,7 @@
 
           <label class="check-row">
             <input id="watHideImmersiveTranslations" type="checkbox" />
-            <span><b>屏蔽沉浸式翻译插入的译文</b><small>仅隐藏 WhatsApp 右侧聊天窗口内的第三方译文，左侧列表不处理。</small></span>
+            <span><b>屏蔽第三方翻译插件插入的译文</b><small>仅隐藏 WhatsApp 右侧聊天窗口内的第三方译文，左侧列表不处理。</small></span>
           </label>
 
           <div class="shortcut-setting">

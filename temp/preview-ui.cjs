@@ -27,24 +27,16 @@ const css = fs.readFileSync(path.join(root, 'timezone.css'), 'utf8');
 
 const stateScript = (opts) => `
   const root = document.getElementById('wat-region-time-root');
-  root.querySelector('.wat-region').textContent = '乌克兰';
+  root.querySelector('.wat-region').textContent = '${opts.region}';
   root.querySelector('.wat-time').textContent = '${opts.time}';
-  const presence = root.querySelector('.wat-presence');
-  presence.hidden = ${opts.presenceHidden};
-  presence.dataset.state = '${opts.presence}';
-  presence.title = '客户${opts.presence === 'online' ? '在线' : '离线'}：${opts.presenceText}';
-  root.querySelector('.wat-phone').textContent = '+380676503011';
-  root.querySelector('.wat-detail-region').textContent = '乌克兰';
-  const ph = root.querySelector('.wat-presence-hint');
-  ph.textContent = '${opts.presenceText}';
-  ph.dataset.state = '${opts.presence}';
-  root.querySelector('.wat-presence-toggle').checked = ${opts.presenceOn};
-  root.querySelector('.wat-language').innerHTML = '<option>自动：俄语（自动识别 99%）</option>';
-  root.querySelector('.wat-profile').innerHTML = '<option>仓储设备</option>';
-  root.querySelector('.wat-profile-hint').textContent = '优化货架、托盘、叉车、承载和安装术语';
-  root.querySelector('.wat-timezone').innerHTML = '<option>Europe/Kyiv</option>';
-  root.querySelector('.wat-manual-phone').value = '+380676503011';
-  root.querySelector('.wat-popover-contact').textContent = 'Ihor Petrenko';
+  root.querySelector('.wat-phone').textContent = '${opts.phone}';
+  root.querySelector('.wat-detail-region').textContent = '${opts.region}';
+  root.querySelector('.wat-language').innerHTML = '<option>${opts.language}</option>';
+  root.querySelector('.wat-profile').innerHTML = '<option>${opts.profile}</option>';
+  root.querySelector('.wat-profile-hint').textContent = '${opts.hint}';
+  root.querySelector('.wat-timezone').innerHTML = '<option>${opts.timezone}</option>';
+  root.querySelector('.wat-manual-phone').value = '${opts.phone}';
+  root.querySelector('.wat-popover-contact').textContent = '${opts.contact}';
 `;
 
 const render = (opts) => `<!doctype html>
@@ -70,7 +62,7 @@ const render = (opts) => `<!doctype html>
   <div class="mock-header">
     <span class="mock-avatar"></span>
     <div>
-      <div class="mock-name">Ihor Petrenko</div>
+      <div class="mock-name">${opts.contact}</div>
       <div class="mock-sub">${opts.subtitle}</div>
     </div>
     <span class="mock-actions">•••</span>
@@ -83,81 +75,32 @@ const render = (opts) => `<!doctype html>
 <script>${stateScript(opts)}</script>
 </body></html>`;
 
-// 摘要条单独渲一页：状态灯挪到时间之后，这一页专门核对它的位置与间距。
-const renderSummary = (opts) => `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>TransMate 摘要条预览</title>
-<style>
-  body { margin: 0; padding: 28px; background: #eff2f5; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .mock-header { position: relative; display: flex; align-items: center; gap: 12px; width: 560px;
-    padding: 10px 14px; border-radius: 10px; background: #f0f2f5; box-shadow: 0 1px 3px rgba(11,20,26,.14); }
-  .mock-avatar { width: 38px; height: 38px; border-radius: 50%; background: #b9c6c2; }
-  .mock-name { font-size: 15px; font-weight: 600; color: #111b21; }
-  .mock-sub { font-size: 12.5px; color: #667781; }
-  .mock-actions { margin-left: auto; color: #54656f; letter-spacing: 2px; }
-  h1 { margin: 0 0 14px; font-size: 15px; color: #54656f; font-weight: 600; }
-  ${css}
-</style></head>
-<body>
-<h1>${opts.title}</h1>
-<div class="mock-header">
-  <span class="mock-avatar"></span>
-  <div>
-    <div class="mock-name">Ihor Petrenko</div>
-    <div class="mock-sub">${opts.subtitle}</div>
-  </div>
-  <span class="mock-actions">•••</span>
-  <div id="wat-region-time-root" class="wat-root" data-position="status-line" data-state="known"
-       style="position:absolute; left:300px; top:9px;">
-    <button class="wat-summary" type="button" aria-expanded="false">
-      <span class="wat-region">乌克兰</span>
-      <span class="wat-time-label">当地时间：</span>
-      <span class="wat-time">${opts.time}</span>
-      <span class="wat-presence" ${opts.presenceHidden ? 'hidden' : ''} data-state="${opts.presence}"></span>
-    </button>
-  </div>
-</div>
-</body></html>`;
-
 const variants = {
   'preview-ui.html': {
-    title: '状态 A：在线 + 指示灯打开（默认态）',
+    title: '状态 A：正常识别（乌克兰 / 俄语）',
     subtitle: '在线', time: '17:26',
-    presence: 'online', presenceText: '在线', presenceHidden: false,
-    presenceOn: true
+    region: '乌克兰', phone: '+380676503011', language: '自动：俄语（自动识别 99%）',
+    profile: '仓储设备', hint: '优化货架、托盘、叉车、承载和安装术语',
+    timezone: 'Europe/Kyiv', contact: 'Ihor Petrenko'
   },
   'preview-ui-b.html': {
-    title: '状态 B：离线 + 指示灯关闭',
+    title: '状态 B：超长联系人名与超长专家说明（核对截断与换行）',
     subtitle: '最后上线时间 昨天 21:10', time: '11:05',
-    presence: 'offline', presenceText: '最后上线时间 昨天 21:10', presenceHidden: false,
-    presenceOn: false
+    region: '阿拉伯联合酋长国', phone: '+971501234567', language: '自动：阿拉伯语（自动识别 96%）',
+    profile: '建材与五金出口', hint: '客户备注名很长时标题要省略号收尾，专家说明允许换行、不能被裁掉',
+    timezone: 'Asia/Dubai',
+    contact: 'Al Maktoum Trading Est. L.L.C. — Ahmed'
   },
   'preview-ui-c.html': {
-    title: '状态 C：WhatsApp 不公开状态（指示灯自动收起）',
-    subtitle: '在线', time: '11:05',
-    presence: 'offline', presenceText: '—', presenceHidden: true,
-    presenceOn: true
-  }
-};
-
-const summaries = {
-  'preview-summary.html': {
-    title: '摘要条 A：状态灯在右侧（在线）',
-    subtitle: '在线', time: '17:26', presence: 'online', presenceHidden: false
-  },
-  'preview-summary-b.html': {
-    title: '摘要条 B：状态灯在右侧（离线）',
-    subtitle: '最后上线时间 昨天 21:10', time: '11:05', presence: 'offline', presenceHidden: false
-  },
-  'preview-summary-c.html': {
-    title: '摘要条 C：读不到状态（指示灯收起，右侧不留空）',
-    subtitle: '在线', time: '11:05', presence: 'offline', presenceHidden: true
+    title: '状态 C：号码未识别（地区与时间待定）',
+    subtitle: '在线', time: '--:--',
+    region: '识别中', phone: '未识别', language: '自动',
+    profile: '通用', hint: '还没有足够的线索，先按通用语气翻译',
+    timezone: 'UTC', contact: '当前联系人'
   }
 };
 
 for (const [name, opts] of Object.entries(variants)) {
   fs.writeFileSync(path.join(__dirname, name), render(opts), 'utf8');
 }
-for (const [name, opts] of Object.entries(summaries)) {
-  fs.writeFileSync(path.join(__dirname, name), renderSummary(opts), 'utf8');
-}
-console.log('wrote', [...Object.keys(variants), ...Object.keys(summaries)].join(', '));
+console.log('wrote', Object.keys(variants).join(', '));

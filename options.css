@@ -109,7 +109,6 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.2px; }
 
 .chat-customizer { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 28px; }
 .chat-colors { margin-top: 17px; }
-.panel-settings { display: grid; gap: 12px; margin-top: 22px; padding-top: 22px; border-top: 1px solid #e8efec; }
 .check-row { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid #e1e8e5; border-radius: 11px; background: #fafcfb; cursor: pointer; }
 .check-row input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: #008069; }
 .check-row span { display: grid; gap: 3px; }

@@ -27,8 +27,7 @@ const DEFAULTS = {
   watChatTranslationBackground: "#eaf2ff",
   watChatTranslationFontSize: 13,
   watHideImmersiveTranslations: true,
-  watChatShortcut: "Alt+Q",
-  watPresenceIndicator: true
+  watChatShortcut: "Alt+Q"
 };
 
 const APPEARANCE_DEFAULTS = {
@@ -54,7 +53,11 @@ const CHAT_DEFAULTS = {
 
 const $ = (id) => document.getElementById(id);
 const clamp = (value, min, max, fallback) => {
-  const number = Number(value);
+  // Number("") 等于 0，而 0 是有限数，所以空输入必须先单独判掉。
+  // 否则清空数字输入框再保存，值会存成下限（-400px、10px 之类），而不是默认值。
+  const raw = String(value ?? "").trim();
+  if (!raw) return fallback;
+  const number = Number(raw);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
 };
 const presets = globalThis.TLP_PROVIDER_PRESETS || {};
@@ -64,6 +67,8 @@ let activeProvider = "gemini";
 let availableModels = [];
 let providerGeneration = 0;
 const providerActionSequence = { models: 0, test: 0 };
+/** "设置已保存"提示的定时器句柄。每次保存前要撤掉上一次的，否则提示会互相擦掉。 */
+let statusClearTimer = null;
 const LEGACY_TRANSLATION_PROFILES = {
   adaptive: "immersive",
   chat: "friend-casual",
@@ -71,7 +76,7 @@ const LEGACY_TRANSLATION_PROFILES = {
   technical: "warehouse-equipment"
 };
 const TRANSLATION_PROFILE_HELP = {
-  immersive: "沉浸通用专家：结合上下文生成自然、准确且无机器翻译感的译文。",
+  immersive: "自然通用专家：结合上下文生成自然、准确且无机器翻译感的译文。",
   literal: "忠实直译专家：保留原句结构、语气、歧义、数字和术语，不主动改写。",
   paraphrase: "自然意译专家：在不改变事实的前提下重组表达，使译文更符合母语习惯。",
   "friend-casual": "朋友聊天专家：日常、简短、自然，保留称呼、语气词、表情和口语节奏。",
@@ -303,14 +308,47 @@ function currentProviderPayload() {
   return { providerId: activeProvider, config: providerConfigs[activeProvider] };
 }
 
+// 按钮文案必须由 kind 推出来，**不能读 DOM**。
+// 读 DOM 会踩这个坑：点"获取可用模型" → 文字变"获取中…" → 请求还在飞时切换服务商
+// （按钮被重新启用，文字却没跟着复位）→ 再点一次，这次抓到的"原文案"就是"获取中…"，
+// 请求结束后写回去，按钮就永久显示"获取中…"，只能刷新设置页才能恢复。
+const PROVIDER_ACTION_LABELS = {
+  models: { idle: "获取可用模型", busy: "获取中…" },
+  test: { idle: "测试连接", busy: "测试中…" }
+};
+
+/**
+ * 这次请求的结果还算不算数。
+ *
+ * 三个条件缺一不可：用户没换服务商、没换过表单、也没有更新的一次请求。
+ * 原来这段条件被原样抄了三遍（模型分支 / 测试分支 / 错误分支），
+ * 抄漏一个的表现是"上一个服务商的结果盖掉当前界面的"——
+ * 用户点了测试连接，中途换了服务商，结果提示却属于刚换走的那个。
+ */
+function isProviderActionStale(kind, requestProvider, requestGeneration, actionId) {
+  return activeProvider !== requestProvider
+    || requestGeneration !== providerGeneration
+    || actionId !== providerActionSequence[kind];
+}
+
+/** 模型列表拿到后先落缓存。返回排好序的列表，空列表算失败。 */
+async function cacheFetchedModels(response, requestProvider) {
+  const models = sortModelsForTranslation(response.models || []);
+  if (!models.length) throw new Error("该服务不支持读取模型列表，请手动填写模型名称");
+  providerModelCache[requestProvider] = models;
+  await chrome.storage.local.set({ providerModelCache });
+  return models;
+}
+
 async function runProviderAction(kind) {
   const button = kind === "models" ? $("listModels") : $("testProvider");
-  const original = button.textContent;
+  const labels = PROVIDER_ACTION_LABELS[kind];
   const requestProvider = activeProvider;
   const requestGeneration = providerGeneration;
   const actionId = ++providerActionSequence[kind];
+  const stale = () => isProviderActionStale(kind, requestProvider, requestGeneration, actionId);
   button.disabled = true;
-  button.textContent = kind === "models" ? "获取中…" : "测试中…";
+  button.textContent = labels.busy;
   setInlineStatus("");
   try {
     const payload = currentProviderPayload();
@@ -321,87 +359,117 @@ async function runProviderAction(kind) {
     });
     if (!response?.ok) throw new Error(response?.error || "服务没有返回结果");
     if (kind === "models") {
-      const models = sortModelsForTranslation(response.models || []);
-      if (!models.length) throw new Error("该服务不支持读取模型列表，请手动填写模型名称");
-      providerModelCache[requestProvider] = models;
-      await chrome.storage.local.set({ providerModelCache });
-      if (activeProvider === requestProvider && requestGeneration === providerGeneration && actionId === providerActionSequence[kind]) {
-        renderModelOptions(models);
-        openModelOptions();
-        setInlineStatus(`已获取 ${models.length} 个模型，请直接点击候选项完成选择。`, "success");
-      }
-    } else if (activeProvider === requestProvider && requestGeneration === providerGeneration && actionId === providerActionSequence[kind]) {
-      setInlineStatus(`连接成功，测试结果：${response.text}`, "success");
+      // 缓存要在判断"还新不新"之前写：这份模型列表属于 requestProvider，
+      // 和"界面现在显示哪个服务商"没关系。中途换了服务商就把它丢掉，等于白跑一次请求。
+      const models = await cacheFetchedModels(response, requestProvider);
+      if (stale()) return;
+      renderModelOptions(models);
+      openModelOptions();
+      setInlineStatus(`已获取 ${models.length} 个模型，请直接点击候选项完成选择。`, "success");
+      return;
     }
+    if (stale()) return;
+    setInlineStatus(`连接成功，测试结果：${response.text}`, "success");
   } catch (error) {
-    if (activeProvider === requestProvider && requestGeneration === providerGeneration && actionId === providerActionSequence[kind]) {
-      setInlineStatus(error.message || String(error), "error");
-    }
+    if (!stale()) setInlineStatus(error.message || String(error), "error");
   } finally {
     // 这里只能用 actionId 判断，不能把 providerGeneration 也算进去：
     // providerGeneration 会在用户切换服务商时自增，而"测试连接"请求还在飞。
     // 那样 finally 的条件不成立，按钮就永远停在禁用状态、文字停在"测试中…"，
     // 用户必须先刷新设置页才能再点一次。
     if (actionId === providerActionSequence[kind]) {
-      button.textContent = original;
+      button.textContent = labels.idle;
       button.disabled = kind === "models"
         && TLP_ADAPTERS_WITHOUT_MODEL_LIST.includes(effectiveProviderConfig(activeProvider).adapter);
     }
   }
 }
 
-async function loadSettings() {
-  const settings = await chrome.storage.local.get(DEFAULTS);
-  providerConfigs = { ...(settings.providerConfigs || {}) };
-  providerModelCache = { ...(settings.providerModelCache || {}) };
-  if (!providerConfigs.gemini && (settings.apiKey || settings.model)) {
-    providerConfigs.gemini = {
-      apiKey: settings.apiKey || "",
-      baseUrl: presets.gemini.baseUrl,
-      model: settings.model || presets.gemini.model
-    };
+/**
+ * 决定初始服务商，并顺手迁移 v2.x 只存过顶层 apiKey 的老配置。
+ *
+ * 迁移**只搬 apiKey 和 baseUrl，不搬 model**：搬 model 等于把"当时那个模型名"
+ * 钉死进用户配置，之后 providers.js 里的预设升级就再也到不了他那里
+ * （这正是"模型名会过期"那个坑的入口）。不搬的话，模型自然走 presets.gemini.model。
+ */
+function resolveInitialProvider(settings) {
+  const configs = { ...(settings.providerConfigs || {}) };
+  if (!configs.gemini && settings.apiKey) {
+    configs.gemini = { apiKey: settings.apiKey, baseUrl: presets.gemini.baseUrl };
   }
   // 与后台保持一致：老用户沿用 Gemini，新装用户默认免费档。
-  activeProvider = presets[settings.provider]
+  const provider = presets[settings.provider]
     ? settings.provider
     : (settings.apiKey ? "gemini" : "googlefree");
+  return { configs, provider };
+}
+
+/** 铺满服务商下拉框。选项直接来自 providers.js 预设，所以新增服务商不用改这里。 */
+function fillProviderOptions() {
   $("provider").replaceChildren(...Object.entries(presets).map(([id, preset]) => {
     const option = document.createElement("option");
     option.value = id;
     option.textContent = preset.label;
     return option;
   }));
-  renderProvider();
+}
 
+/** 商务翻译面板：开关、方向、翻译专家、客户语言、触发方式、禁用网站。 */
+async function fillTranslationFields(settings) {
   $("enabled").checked = settings.enabled !== false;
   $("direction").value = settings.direction || "auto";
-  const savedProfile = LEGACY_TRANSLATION_PROFILES[settings.translationProfile] || settings.translationProfile;
-  const translationProfile = TRANSLATION_PROFILE_HELP[savedProfile]
-    ? savedProfile
-    : DEFAULTS.translationProfile;
-  $("translationProfile").value = translationProfile;
-  if (translationProfile !== settings.translationProfile) {
-    await chrome.storage.local.set({ translationProfile });
-  }
+  const saved = LEGACY_TRANSLATION_PROFILES[settings.translationProfile] || settings.translationProfile;
+  const profile = TRANSLATION_PROFILE_HELP[saved] ? saved : DEFAULTS.translationProfile;
+  $("translationProfile").value = profile;
   $("customerLanguage").value = settings.customerLanguage || "auto";
   $("triggerCount").value = settings.triggerCount || 3;
   $("triggerTimeout").value = settings.triggerTimeout || 1500;
   $("disabledSites").value = (settings.disabledSites || []).join("\n");
-  $("watEnabled").checked = settings.watEnabled !== false;
-  for (const key of Object.keys(APPEARANCE_DEFAULTS)) $(key).value = settings[key] ?? APPEARANCE_DEFAULTS[key];
+  // 老版本的档位名认不出来时会退回默认档，这里立刻回写一次。
+  // 不回写的话，用户每次打开设置页看到的都是默认档，一保存就把自己的选择冲掉了。
+  if (profile === settings.translationProfile) return;
+  await chrome.storage.local.set({ translationProfile: profile });
+}
 
+/** WhatsApp 面板：总开关、标签外观、聊天翻译。 */
+function fillWhatsAppFields(settings) {
+  $("watEnabled").checked = settings.watEnabled !== false;
+  for (const key of Object.keys(APPEARANCE_DEFAULTS)) {
+    $(key).value = settings[key] ?? APPEARANCE_DEFAULTS[key];
+  }
   $("watChatTranslationEnabled").checked = settings.watChatTranslationEnabled === true;
   for (const key of Object.keys(CHAT_DEFAULTS)) {
     if ($(key).type === "checkbox") $(key).checked = settings[key] !== false;
     else $(key).value = settings[key] ?? CHAT_DEFAULTS[key];
   }
-  $("watPresenceIndicator").checked = settings.watPresenceIndicator !== false;
-  if (BROWSER_RESERVED_SHORTCUTS.has($("watChatShortcut").value.toLocaleLowerCase())) {
-    const oldShortcut = $("watChatShortcut").value;
-    $("watChatShortcut").value = CHAT_DEFAULTS.watChatShortcut;
-    await chrome.storage.local.set({ watChatShortcut: CHAT_DEFAULTS.watChatShortcut });
-    setShortcutHint(`${oldShortcut} 被浏览器占用，已自动更换为 ${CHAT_DEFAULTS.watChatShortcut}。`, "error");
-  }
+}
+
+/**
+ * 快捷键被浏览器占用时必须换掉。
+ * 留着的话用户按下去毫无反应，而且不报任何错 —— 是最难自己查出来的一类问题。
+ */
+async function replaceReservedShortcut() {
+  const field = $("watChatShortcut");
+  if (!BROWSER_RESERVED_SHORTCUTS.has(field.value.toLocaleLowerCase())) return;
+  const replaced = field.value;
+  field.value = CHAT_DEFAULTS.watChatShortcut;
+  await chrome.storage.local.set({ watChatShortcut: CHAT_DEFAULTS.watChatShortcut });
+  setShortcutHint(`${replaced} 被浏览器占用，已自动更换为 ${CHAT_DEFAULTS.watChatShortcut}。`, "error");
+}
+
+async function loadSettings() {
+  const settings = await chrome.storage.local.get(DEFAULTS);
+  const { configs, provider } = resolveInitialProvider(settings);
+  providerConfigs = configs;
+  providerModelCache = { ...(settings.providerModelCache || {}) };
+  activeProvider = provider;
+  fillProviderOptions();
+  renderProvider();
+
+  await fillTranslationFields(settings);
+  fillWhatsAppFields(settings);
+  await replaceReservedShortcut();
+
   updatePreview();
   updateChatPreview();
   updateTranslationProfileHelp();
@@ -535,6 +603,11 @@ $("resetChatShortcut").addEventListener("click", () => {
 
 $("save").addEventListener("click", async () => {
   const status = $("status");
+  // 每次保存前先撤掉上一条提示的定时器。
+  // 不撤的话有两个后果：连点两次保存，第一次的定时器会把第二次刚写上的"已保存"擦掉；
+  // 更糟的是"保存成功后又立刻保存失败"，那条错误提示会被上一次的定时器无声清掉 ——
+  // 用户以为保存成功了，其实没有。
+  clearTimeout(statusClearTimer);
   try {
     captureProviderDraft();
     const endpoint = providerConfigs[activeProvider]?.baseUrl;
@@ -547,8 +620,13 @@ $("save").addEventListener("click", async () => {
     const values = {
       provider: activeProvider,
       providerConfigs,
+      // 顶层 apiKey 保留：background / popup 用它判断"没存过 provider 的老用户是不是 Gemini 用户"。
       apiKey: gemini.apiKey || "",
-      model: gemini.model || presets.gemini.model,
+      // 顶层 model 刻意不再写。
+      // 它原来只是 Gemini 模型的一份"快照镜像"，模型名会过期（deepseek-chat 就退役过），
+      // 而 background 曾经把这个镜像排在预设之后 —— 于是镜像一旦固化，
+      // providers.js 里的模型升级就再也传不到用户那里。现在模型的唯一来源是
+      // providerConfigs[id].model → providers.js 预设，这里不再造第二份。
       enabled: $("enabled").checked,
       direction: $("direction").value,
       translationProfile: $("translationProfile").value,
@@ -572,8 +650,7 @@ $("save").addEventListener("click", async () => {
       watChatTranslationBackground: $("watChatTranslationBackground").value,
       watChatTranslationFontSize: clamp($("watChatTranslationFontSize").value, 10, 22, 13),
       watHideImmersiveTranslations: $("watHideImmersiveTranslations").checked,
-      watChatShortcut: $("watChatShortcut").value.trim(),
-      watPresenceIndicator: $("watPresenceIndicator").checked
+      watChatShortcut: $("watChatShortcut").value.trim()
     };
     await chrome.storage.local.set(values);
     $("triggerCount").value = values.triggerCount;
@@ -581,7 +658,10 @@ $("save").addEventListener("click", async () => {
     $("disabledSites").value = values.disabledSites.join("\n");
     status.dataset.kind = "success";
     status.textContent = "设置已保存并立即生效";
-    setTimeout(() => { status.textContent = ""; delete status.dataset.kind; }, 2200);
+    statusClearTimer = setTimeout(() => {
+      status.textContent = "";
+      delete status.dataset.kind;
+    }, 2200);
   } catch (error) {
     status.dataset.kind = "error";
     status.textContent = `保存失败：${error.message || error}`;

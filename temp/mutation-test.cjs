@@ -28,40 +28,47 @@ const root = path.resolve(__dirname, '..');
  * 避免出现"恰好被另一个测试兜住"的假阳性。
  */
 const MUTATIONS = [
-  ['硬信息：柜型 HC 不再归一到 HQ', 'verify.js',
-    'type === "HC" ? "HQ" : type', 'type', '40HC'],
-  ['硬信息：数字丢失不再折算中文数字', 'verify.js',
-    'for (const value of chineseNumeralsAsDigits(translatedText)) translatedNumbers.add(value);',
-    'for (const value of []) translatedNumbers.add(value);',
-    '没有出现在译文里'],
-  ['硬信息：原文有中文数字时仍报“多出数字”', 'verify.js',
-    'if (source.hasChineseNumerals) return;', 'if (false) return;',
-    '出现了原文没有的数字'],
-  ['硬信息：货币候选从“任一命中”改成“全部命中”', 'verify.js',
-    '[...source.currencies].some((code) => target.currencies.has(code))',
-    '[...source.currencies].every((code) => target.currencies.has(code))',
-    'currency'],
-  ['硬信息：不再排除 USD12 这类“金额+数字”', 'verify.js',
-    'if (NON_MODEL_PREFIXES.has(match[1])) continue;', 'if (false) continue;',
-    'USD12'],
-  ['硬信息：数字抽取退回 \\d[\\d, ]*（会把 HR-2400, 20GP 读成一个数）', 'verify.js',
-    'const NUMBER_PATTERN = /\\d{1,3}(?:[,\\u00a0 ]\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?/g;',
-    'const NUMBER_PATTERN = /\\d[\\d,\\u00a0 ]*/g;',
-    '240020'],
-  ['后台：译文出口丢掉 warnings', 'background.js',
-    'return { text: output, targetLanguage: target.code, warnings: TLP_VERIFY.verifyTranslation(text, output) };',
-    'return { text: output, targetLanguage: target.code };',
-    'warnings'],
-  ['后台：批量出口绕过 withWarnings 自己拼对象', 'background.js',
-    '.map((item) => withWarnings(item, byId.get(item.id) || ""))',
+  // 批量出口必须经过统一的收口函数，否则结果形状会散开 ——
+  // 这正是 v3.9.10 "AI 批量漏传参数、换个服务商就静默失效"那类事故的温床。
+  // 由"聊天批量翻译的四条出口给出同一个结果形状"抓住（结构守卫 + 行为验证两道）。
+  ['后台：批量出口绕过 toChatResult 自己拼对象', 'background.js',
+    '.map((item) => toChatResult(item, byId.get(item.id) || ""))',
     '.map((item) => ({ id: item.clientId, text: byId.get(item.id) || "" }))',
-    'withWarnings'],
+    '四个出口都要经过 toChatResult'],
   // 下面这条锚点本身就是一行源码，里面的 ${clean} 是代码而不是模板占位符，
   // 所以整条写成一行，让豁免注释正好落在含该字符串的那行上。
   // eslint-disable-next-line no-template-curly-in-string
   ['弹窗：停用本站不再覆盖子域名', 'popup.js', 'host.endsWith(`.${clean}`)', 'false', '子域名'],
   ['聊天：语言缓存不再看置信度门槛', 'timezone.js',
-    '&& freshLanguage.confidence >= 60', '&& freshLanguage.confidence >= 0', '置信度']
+    '&& freshLanguage.confidence >= 60', '&& freshLanguage.confidence >= 0', '置信度'],
+  ['号码：手动填写的值不再优先', 'timezone.js',
+    'const phone = manualPhone || detectedPhone || cachedPhone || null;',
+    'const phone = detectedPhone || cachedPhone || null;',
+    '手动值必须压过页面扫描值'],
+  ['号码：自动识别值又把手动值冲掉', 'timezone.js',
+    'if (detectedPhone && !manualPhone && cachedPhone !== detectedPhone) {',
+    'if (detectedPhone && cachedPhone !== detectedPhone) {',
+    '手动值会被冲掉'],
+  ['后台：长输入不再预检（又把注定失败的请求发出去）', 'background.js',
+    'if (source.length > MAX_TRANSLATION_INPUT) {', 'if (false) {',
+    '不该把注定失败的请求发出去'],
+  ['后台：推理模型的输出预算不再抬高', 'background.js',
+    'const floor = reasoning ? minimum * REASONING_MINIMUM_FACTOR : minimum;',
+    'const floor = minimum;',
+    '输出预算必须高于普通模型'],
+  // 下面三条来自 v3.9.12 修掉的缺陷。它们的共同点是"不报错，只是白花钱或功能静默失效"，
+  // 最容易在后续重构里被顺手改回去，所以放进变异测试常驻看护。
+  ['聊天翻译：中文原文不再被跳过（白花钱 + 重复气泡）', 'timezone.js',
+    'if (/^zh-(?:tw|hk|mo|hant)\\b/i.test(normalizedTarget)) return false;',
+    'if (targetBase === "zh" && normalizedTarget.includes("-")) return false;',
+    'zh-CN 下中文不该再送去翻译'],
+  ['设置页：数字输入框清空后存成 0 而不是默认值', 'options.js',
+    'if (!raw) return fallback;', 'if (false) return fallback;',
+    '空串要返回 fallback'],
+  ['后台：批量翻译的数字 id 再次连坐整批', 'background.js',
+    'typeof row !== "object" || typeof row.text !== "string"',
+    'typeof row !== "object" || typeof row.id !== "string" || typeof row.text !== "string"',
+    '批量翻译包含无效项目']
 ];
 
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');

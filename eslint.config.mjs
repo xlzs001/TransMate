@@ -21,9 +21,9 @@ const extensionGlobals = {
 // 跨文件全局：靠 importScripts / <script src> 注入，不是 ES module 导入。
 //
 // 这里按"文件实际加载了什么"逐文件声明，而不是一把梭全放开。
-// 原因：background.js 同时加载了 providers.js + verify.js，
-// 但 options.html / popup.html 只加载了 providers.js。
-// 如果在 options.js 里写了 TLP_VERIFY，运行时就是 undefined，
+// 原因：providers.js 被 background.js / options.js / popup.js 三处加载，
+// 而 timezone.js / content.js 里根本没有它。
+// 如果在 timezone.js 里写了 TLP_PROVIDER_PRESETS，运行时就是 undefined，
 // 而这种错误在浏览器里只会表现为"某个按钮点了没反应"，极难定位。
 // 逐文件声明能让 ESLint 直接把它标出来。
 //
@@ -34,7 +34,6 @@ const fromProviders = {
   TLP_ADAPTERS_WITHOUT_MODEL_LIST: "readonly",
   TLP_PROVIDER_PRESETS: "readonly"
 };
-const fromVerify = { TLP_VERIFY: "readonly" };
 
 const correctnessRules = {
   // ---- 抓真 bug 的规则：一律 error ----
@@ -113,15 +112,10 @@ export default [
     }
   },
 
-  // background.js 用 importScripts 同时加载了 providers.js 和 verify.js。
+  // providers.js 是唯一一份跨文件全局：background.js 用 importScripts 加载，
+  // options.html / popup.html 用 <script src> 加载。
   {
-    files: ["background.js"],
-    languageOptions: { globals: { ...extensionGlobals, ...fromProviders, ...fromVerify } }
-  },
-
-  // options.html / popup.html 只加载 providers.js，没有 verify.js。
-  {
-    files: ["options.js", "popup.js"],
+    files: ["background.js", "options.js", "popup.js"],
     languageOptions: { globals: { ...extensionGlobals, ...fromProviders } }
   },
 

@@ -154,40 +154,6 @@ function popupContext(storage = {}, session = {}) {
   // 刻意不暴露内部函数名 —— 测行为不测结构，这样重构时测试不用跟着改。
   return { sandbox, api: sandbox.popupApi, element: id => document.getElementById(id), writes };
 }
-function verifyApi() {
-  const sandbox = { console };
-  vm.createContext(sandbox);
-  vm.runInContext(source('verify.js'), sandbox, { filename: 'verify.js' });
-  return sandbox.TLP_VERIFY;
-}
-// timezone.js 里"客户在线状态指示灯"那一段同样是纯逻辑，单独切出来执行。
-function presenceModule(config) {
-  const code = source('timezone.js');
-  // 按"整行相等"定位，不要用 indexOf 找注释文本：
-  // 默认值表（DISPLAY_DEFAULTS）里也有一行同名注释，indexOf 会先命中它，
-  // 于是切片从一个错误的起点开始（真正的模块函数一个都切不进来）。
-  // 顺带也就摆脱了对某个具体换行符的依赖。
-  const lines = code.split('\n');
-  const start = lines.findIndex(line => line.trim() === '// 客户在线状态指示灯');
-  const end = lines.findIndex((line, index) => index > start && line.trim().startsWith('function createRoot()'));
-  assert.ok(start > -1 && end > start, 'timezone.js 里应存在客户在线状态指示灯模块');
-  const snippet = lines.slice(start, end).join('\n');
-  const sandbox = {
-    console, activeConfig: config, activeHeader: null, ROOT_ID: 'wat-region-time-root',
-    cleanText: value => String(value || '').replace(/\s+/g, ' ').trim(),
-    document: { createTreeWalker: () => ({ nextNode: () => false }) },
-    NodeFilter: { SHOW_TEXT: 4 },
-    Date, Math, Number, String, Object, Array, Set, RegExp
-  };
-  vm.createContext(sandbox);
-  vm.runInContext(
-    snippet
-      + '\nglobalThis.presenceApi = { isOnlinePresence, looksLikePresenceText, isIconLike, getPresenceElement, detectPresence, renderPresence };',
-    sandbox,
-    { filename: 'timezone-presence.js' }
-  );
-  return sandbox;
-}
 // timezone.js 的"文字系统识别"整段都是纯函数（只依赖正则和入参，不碰 DOM），
 // 可以整段切出来单独跑。重构前它是 42 个分支的 if 链却一条测试都没有 ——
 // 正是"没人测"才让它一路长到 42。现在这段有了保护，改动它才敢放心。
@@ -227,42 +193,109 @@ function languageStateModule(manualLanguages = [['ru', '俄语', 'Russian']]) {
   );
   return sandbox.languageApi;
 }
-function fakePresenceHeader(presenceText) {
-  if (!presenceText) return { querySelector: () => null };
-  const subtitle = {
-    textContent: presenceText,
-    closest: () => null,
-    getAttribute: name => (name === 'title' ? presenceText : null)
+// timezone.js 的号码查找：三处候选来源 + 一个"只在换联系人时重扫"的缓存。
+// 这段以前一条测试都没有 —— 正是"没人测"才让同一个循环被抄了三遍。
+function phoneFinderModule(deps = {}) {
+  const code = source('timezone.js');
+  const lines = code.split('\n');
+  const start = lines.findIndex(line => line.trim().startsWith('function valuesFromElement('));
+  const end = lines.findIndex((line, index) => index > start && line.trim().startsWith('function isThirdPartyTranslationNode('));
+  assert.ok(start > -1 && end > start, 'timezone.js 里应存在号码查找模块');
+  const snippet = lines.slice(start, end).join('\n');
+  const sandbox = {
+    console, ROOT_ID: 'wat-region-time-root', stopped: false,
+    chrome: { runtime: { sendMessage: () => ({ catch() {} }) } },
+    handleExtensionError() {},
+    cleanText: value => String(value || '').replace(/\s+/g, ' ').trim(),
+    getContactTitle: deps.getContactTitle || (() => ''),
+    normalizePhone: deps.normalizePhone || (value => String(value || '').trim() || null),
+    document: deps.document || { querySelector: () => null, querySelectorAll: () => [] },
+    window: deps.window || { innerWidth: 1200, location: { href: '' } },
+    Number, String, Array, Object, RegExp, Math, Set
   };
-  return { querySelector: selector => (selector.includes('subtitle') ? subtitle : null) };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    snippet + '\nglobalThis.phoneApi = { valuesFromElement, firstPhoneFrom, findPhoneInHeader, findPhoneInChatMetadata, findPhoneInVisibleContactPanel, getPhone };',
+    sandbox,
+    { filename: 'timezone-phone.js' }
+  );
+  return sandbox.phoneApi;
 }
-function fakePresenceRoot() {
-  const marker = {
-    hidden: true, title: '', dataset: {}, offsetWidth: 0,
-    removeAttribute(name) { if (name === 'title') this.title = ''; }
+// resolveContactFacts 决定"面板上到底显示哪个号码"。它依赖三处外部输入，
+// 这里全部换成桩，只验证优先级和写回规则 —— 那才是真会出错的地方。
+function contactFactsModule(deps = {}) {
+  const src = source('timezone.js');
+  const start = src.indexOf('  function resolveContactFacts(');
+  const end = src.indexOf('  /** 拿到号码之后的分支', start);
+  assert.ok(start > -1 && end > start, 'timezone.js 里应存在 resolveContactFacts');
+  const writes = [];
+  const sandbox = {
+    console,
+    STORAGE: {
+      contactMap: 'watContactMap', manualPhones: 'watManualPhones',
+      languageCache: 'watLanguageCacheV3', languageOverrides: 'watLanguageOverrides'
+    },
+    getContactTitle: () => deps.title || '客户 A',
+    getRecentIncomingMessages: () => [],
+    getPhone: () => deps.detected || null,
+    detectCustomerLanguage: () => ({ code: 'en', confidence: 90 }),
+    // shouldCache 固定为 false：这里只关心号码，不想被语言缓存的写入干扰断言。
+    resolveLanguageState: fresh => ({
+      detectedLanguage: fresh, automaticLanguage: fresh, manualLanguageCode: null, shouldCache: false
+    }),
+    safeStorageSet: value => { writes.push(value); }
   };
-  const detail = { textContent: '', dataset: {} };
-  const toggle = { checked: false };
-  return {
-    marker,
-    detail,
-    toggle,
-    root: {
-      dataset: {},
-      querySelector: selector => (selector === '.wat-presence' ? marker
-        : selector === '.wat-presence-hint' ? detail
-          : selector === '.wat-presence-toggle' ? toggle
-            : null)
-    }
-  };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    src.slice(start, end) + '\nglobalThis.contactApi = { resolveContactFacts };',
+    sandbox,
+    { filename: 'timezone-contact.js' }
+  );
+  sandbox.writes = writes;
+  return sandbox;
 }
-
+// shouldSkipChatTranslation 决定"这条消息到底要不要花钱翻译"。它只依赖语言识别，
+// 把识别换成桩就能单独验证跳过规则 —— 这里出错的代价是白花额度。
+function chatSkipModule(detect) {
+  const src = source('timezone.js');
+  const start = src.indexOf('  function shouldSkipChatTranslation(');
+  const end = src.indexOf('  function clearChatTranslationDom(', start);
+  assert.ok(start > -1 && end > start, 'timezone.js 里应存在 shouldSkipChatTranslation');
+  const sandbox = { console, detectSingleLanguage: detect };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    src.slice(start, end) + '\nglobalThis.chatSkipApi = { shouldSkipChatTranslation };',
+    sandbox,
+    { filename: 'timezone-chat-skip.js' }
+  );
+  return sandbox.chatSkipApi;
+}
+// options.js 的 clamp 是纯函数，单独切出来测。它的坑在于 Number("") === 0。
+function optionsClampModule() {
+  const src = source('options.js');
+  const start = src.indexOf('const clamp = (value, min, max, fallback) => {');
+  const stop = src.indexOf('\n};', start);
+  assert.ok(start > -1 && stop > start, 'options.js 里应存在 clamp');
+  const sandbox = { console };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    src.slice(start, stop + 3) + '\nglobalThis.clampApi = { clamp };',
+    sandbox,
+    { filename: 'options-clamp.js' }
+  );
+  return sandbox.clampApi;
+}
 // vm 里造出来的数组/对象原型与宿主机不同，deepStrictEqual 会因为原型不一致而失败。
 // 统一走一次 JSON 往返，拿到宿主机的普通对象再断言。
 const plain = value => JSON.parse(JSON.stringify(value));
 async function run() {
   const passed = [];
   async function test(name, fn) { await fn(); passed.push(name); }
+
+  // 短输入（几个字符）时的输出预算下限。普通模型取 2048；推理模型要抬高，
+  // 因为 max_completion_tokens 是"思考 + 正文"合起来算的（见 M6）。
+  // 断言"推理 > 普通"这个关系而不是某个死数字，以后调系数不用回头改测试。
+  const PLAIN_BUDGET_MIN = 2048;
 
   await test('multiline rich-text insertion is recognized', async () => {
     const { sandbox, document } = contentContext(async () => ({ ok: true, text: 'unused' }));
@@ -301,9 +334,68 @@ async function run() {
     assert.equal(calls, 3);
   });
 
+  // 超长输入必须在**发请求之前**就被拦下来（M4）。
+  // 原来的行为是"先把请求发出去，等服务端回一段 context_length_exceeded 的英文原始报文，
+  // 再整段甩给用户"——钱花掉了，用户还不知道发生了什么。
+  await test('超长输入在发请求之前就被拦下', async () => {
+    let calls = 0;
+    const sandbox = backgroundContext(async () => {
+      calls += 1;
+      return jsonResponse({ choices: [{ message: { content: '译文' }, finish_reason: 'stop' }] });
+    });
+    const send = text => new Promise(resolve => {
+      sandbox.messageHandler({ type: 'TL_TRANSLATE', text, direction: 'zh2en' }, { tab: { id: 1 } }, resolve);
+    });
+
+    const tooLong = await send('字'.repeat(9000));
+    // 先断言"请求根本没发出去"——这才是这条用例真正要守的东西。
+    // 放在前面还让变异测试能报出有意义的信息（见 temp/mutation-test.cjs 的提示关键字）。
+    assert.equal(calls, 0, '不该把注定失败的请求发出去');
+    assert.equal(tooLong.ok, false);
+    assert.match(tooLong.error, /超过单次上限/, '要给一句能看懂的中文提示');
+
+    // 限额之内的照常翻译，不能误伤。
+    const ok = await send('字'.repeat(100));
+    assert.equal(ok.ok, true);
+    assert.equal(calls, 1);
+  });
+
   await test('invalid batch item text type is rejected', async () => {
     const sandbox = backgroundContext(async () => { throw new Error('Network disabled'); });
     assert.throws(() => sandbox.parseBatchTranslationOutput('[{"id":"0","text":{"unexpected":"value"}}]'), /无效项目/);
+  });
+
+  // 模型常把 id 回成数字（"id": 0）。原来按 typeof !== "string" 判无效会连坐整批：
+  // 12 条消息从 1 次请求退化成 3 次，钱多花、还更慢。归一成字符串只丢真正对不上的那条。
+  await test('批量翻译把数字 id 归一成字符串，不再连坐整批', async () => {
+    const sandbox = backgroundContext(async () => { throw new Error('Network disabled'); });
+    const rows = sandbox.parseBatchTranslationOutput('[{"id":0,"text":"Result A"},{"id":1,"text":"Result B"}]');
+    assert.deepEqual(plain(rows), [{ id: '0', text: 'Result A' }, { id: '1', text: 'Result B' }]);
+  });
+
+  // 中文原文在简体目标下必须跳过。原来写的是"目标带 - 就不跳过"，可默认目标 zh-CN
+  // 也带 -，等于这条规则恒成立：中文消息全被送去翻译，白花额度，聊天区还会多出一行
+  // 几乎相同的译文。只有繁体目标才需要把简体原文转过去。
+  await test('中文原文在简体目标下被跳过，只有繁体目标才放行', async () => {
+    const zh = chatSkipModule(() => ({ code: 'zh', name: '中文', confidence: 100 }));
+    assert.equal(zh.shouldSkipChatTranslation('你好，请问什么时候能发货', 'zh-CN'), true, 'zh-CN 下中文不该再送去翻译');
+    assert.equal(zh.shouldSkipChatTranslation('你好，请问什么时候能发货', 'zh-TW'), false, 'zh-TW 下简体要转成繁体');
+    assert.equal(zh.shouldSkipChatTranslation('https://example.com/quote.pdf', 'zh-CN'), true, '纯链接照旧跳过');
+    const ru = chatSkipModule(() => ({ code: 'ru', name: '俄语', confidence: 100 }));
+    assert.equal(ru.shouldSkipChatTranslation('Здравствуйте, есть ли товар?', 'zh-CN'), false, '外语照常翻译');
+  });
+
+  // Number("") 等于 0，而 0 是有限数。原来空输入会被当成 0 再夹到下限，
+  // 于是清空输入框再保存，值会存成 -400px / 10px 这类下限，而不是默认值。
+  await test('数字输入框清空后回落到默认值，而不是下限', async () => {
+    const { clamp } = optionsClampModule();
+    assert.equal(clamp('', -400, 400, 99), 99, '空串要返回 fallback');
+    assert.equal(clamp('   ', -400, 400, 99), 99, '纯空白同理');
+    assert.equal(clamp(null, 2, 5, 3), 3);
+    assert.equal(clamp(undefined, 10, 22, 13), 13);
+    assert.equal(clamp('0', -400, 400, 99), 0, '真的填了 0 就保留 0');
+    assert.equal(clamp('999', -400, 400, 0), 400, '超出上限仍要夹住');
+    assert.equal(clamp('-999', -400, 400, 0), -400, '超出下限仍要夹住');
   });
 
   await test('DeepL translation remains available without polish metadata', async () => {
@@ -316,17 +408,31 @@ async function run() {
   });
 
   await test('OpenAI reasoning model uses completion budget without temperature', async () => {
-    let body;
-    const config = { provider: 'openai', providerConfigs: { openai: { baseUrl: 'https://api.openai.com/v1', apiKey: 'test-only', model: 'gpt-5-mini' } } };
-    const sandbox = backgroundContext(async (_url, options) => {
-      body = JSON.parse(options.body);
-      return jsonResponse({ choices: [{ message: { content: 'Hello' }, finish_reason: 'stop' }] });
-    }, config);
-    const response = await new Promise(resolve => { sandbox.messageHandler({ type: 'TL_TRANSLATE', text: '你好', direction: 'zh2en' }, { tab: { id: 1 } }, resolve); });
-    assert.equal(response.ok, true);
-    assert.equal(body.max_completion_tokens, 2048);
-    assert.equal('max_tokens' in body, false);
-    assert.equal('temperature' in body, false);
+    const send = async (model) => {
+      let body;
+      const config = { provider: 'openai', providerConfigs: { openai: { baseUrl: 'https://api.openai.com/v1', apiKey: 'test-only', model } } };
+      const sandbox = backgroundContext(async (_url, options) => {
+        body = JSON.parse(options.body);
+        return jsonResponse({ choices: [{ message: { content: 'Hello' }, finish_reason: 'stop' }] });
+      }, config);
+      const response = await new Promise(resolve => { sandbox.messageHandler({ type: 'TL_TRANSLATE', text: '你好', direction: 'zh2en' }, { tab: { id: 1 } }, resolve); });
+      assert.equal(response.ok, true);
+      return body;
+    };
+
+    const reasoning = await send('gpt-5-mini');
+    assert.equal('max_tokens' in reasoning, false);
+    assert.equal('temperature' in reasoning, false, '推理模型不接受 temperature');
+
+    // 推理模型的预算要高于普通模型（M6）：
+    // max_completion_tokens 是"思考 + 正文"合起来算的，不抬高的情况下
+    // 思维链会把额度吃光，正文翻到一半就被截断 —— 钱已经花了，用户只看到一条失败提示。
+    // 这里断言的是"推理 > 普通"这个关系，不是某个具体数字，
+    // 这样以后调系数不用回头改测试。
+    const plain = await send('gpt-4o');
+    assert.ok(reasoning.max_completion_tokens > plain.max_completion_tokens,
+      '推理模型的输出预算必须高于普通模型');
+    assert.ok('temperature' in plain, '普通模型必须带 temperature，否则服务端用默认温度、每次结果都不一样');
   });
 
   await test('DeepSeek uses the current model id and disables thinking mode', async () => {
@@ -405,7 +511,8 @@ async function run() {
     const response = await new Promise(resolve => { sandbox.messageHandler({ type: 'TL_TRANSLATE', text: '你好', direction: 'zh2en' }, { tab: { id: 1 } }, resolve); });
     // 模型名藏在地址里，只认 model 字段会把 GPT-5 当成普通模型，发 max_tokens 会 400。
     assert.equal(response.ok, true, response.error);
-    assert.equal(body.max_completion_tokens, 2048);
+    // 预算高于普通模型的下限，说明"藏在地址里的 gpt-5"确实被认成了推理模型。
+    assert.ok(body.max_completion_tokens > PLAIN_BUDGET_MIN, '推理模型的预算要高于普通模型');
     assert.equal('max_tokens' in body, false);
     assert.equal('temperature' in body, false);
   });
@@ -422,7 +529,8 @@ async function run() {
     const response = await new Promise(resolve => { sandbox.messageHandler({ type: 'TL_TRANSLATE', text: '你好', direction: 'zh2en' }, { tab: { id: 1 } }, resolve); });
     assert.equal(response.ok, true, response.error);
     assert.equal(body.model, 'openai/gpt-5');
-    assert.equal(body.max_completion_tokens, 2048);
+    // 同上：预算高于普通模型下限，说明带厂商前缀的 gpt-5 也被认出来了。
+    assert.ok(body.max_completion_tokens > PLAIN_BUDGET_MIN, '推理模型的预算要高于普通模型');
     assert.equal('max_tokens' in body, false);
     assert.equal('temperature' in body, false);
   });
@@ -472,8 +580,14 @@ async function run() {
     // 恢复按钮时若把 providerGeneration 也算进条件，用户在"测试连接"飞行途中
     // 切换服务商，按钮就永远停在禁用状态、文字停在"测试中…"。
     const optionsCode = source('options.js');
-    assert.match(optionsCode, /if \(actionId === providerActionSequence\[kind\]\) \{\s*button\.textContent = original;/, '按钮恢复只应依赖 actionId');
+    assert.match(optionsCode, /if \(actionId === providerActionSequence\[kind\]\) \{\s*button\.textContent = labels\.idle;/, '按钮恢复只应依赖 actionId');
     assert.doesNotMatch(optionsCode, /if \(requestGeneration === providerGeneration && actionId === providerActionSequence\[kind\]\) \{\s*button\.disabled/, '恢复按钮时不应再看 providerGeneration');
+    // 文案不能"把按钮上当时的文字抓下来、结束再写回去"：
+    // 请求飞行途中按钮文字已经是"获取中…"，抓回来写回就等于把它永久钉在那儿。
+    // 文案只能由 kind 推出来 —— 这样无论中途发生什么，恢复时写的都是确定的那个词。
+    assert.doesNotMatch(optionsCode, /const original = button\.textContent/, '按钮文案不能读 DOM');
+    assert.match(optionsCode, /PROVIDER_ACTION_LABELS = \{/, '按钮文案应由 kind 推出');
+    assert.match(optionsCode, /button\.textContent = labels\.busy;/, '忙碌文案也应来自同一张表');
   });
 
   await test('chat translation waits for the shortcut and never starts on its own', async () => {
@@ -660,248 +774,130 @@ async function run() {
     assert.match(called, /generativelanguage\.googleapis\.com/);
   });
 
-  await test('hard facts survive translation without false alarms', async () => {
-    const V = verifyApi();
+  // 顶层 model 是 v2.x 的遗留镜像，options.js 每次保存设置页都会往里写一份"当时的快照"。
+  // 它必须**压不过** providers.js 的预设：模型名会过期（deepseek-chat 就退役过），
+  // 一旦镜像固化，预设里的模型升级就永远传不到用户那里 —— 表现为"新装用户好的、
+  // 老用户报模型不存在"，是最难定位的那一类问题。
+  await test('预设的 Gemini 模型不会被顶层遗留的 model 镜像压掉', async () => {
+    const presetSandbox = { console };
+    vm.createContext(presetSandbox);
+    vm.runInContext(source('providers.js'), presetSandbox, { filename: 'providers.js' });
+    const presetModel = presetSandbox.TLP_PROVIDER_PRESETS.gemini.model;
+    assert.ok(presetModel, 'providers.js 里 gemini 预设应当有默认模型');
 
-    // 数字必须按规范千分位分组抽取。写成 \d[\d,\s]* 会把 "HR-2400, 20GP"
-    // 读成一个数 240020，之后所有比对全是误报。
-    assert.deepEqual(plain([...V.extractHardFacts('HR-2400, 20GP').numbers]), ['2400', '20']);
-    // 千分位、小数补零、前导零都算同一个数。
-    assert.equal(V.normalizeNumber('1,200'), '1200');
-    assert.equal(V.normalizeNumber('12.50'), '12.5');
-    assert.equal(V.normalizeNumber('01200'), '1200');
-    assert.deepEqual(plain(V.verifyTranslation('Total 1,200 pcs, USD 12.50', '共 1200 件，12.5 美元')), []);
-
-    // HC 与 HQ 是同一规格，40 尺高柜也归一，不能因为换了写法就报警。
-    assert.deepEqual(plain([...V.extractHardFacts('40HC').containers]), ['40HQ']);
-    assert.deepEqual(plain([...V.extractHardFacts('40 尺高柜').containers]), ['40HQ']);
-    assert.deepEqual(plain(V.verifyTranslation('40HC', '40HQ')), []);
-    // 归一之后仍然要能发现真的被改写了：40HQ 写成 40GP 是事故。
-    const swapped = V.verifyTranslation('40HQ', '40GP');
-    assert.ok(plain(swapped).some(item => item.kind === 'container' && item.token === '40HQ'));
-
-    // 货币：RMB 归到 CNY，中文"美元"与代码 USD 等价。
-    assert.deepEqual(plain([...V.extractHardFacts('报价 RMB 5000').currencies]), ['CNY']);
-    assert.deepEqual(plain([...V.extractHardFacts('12.50 美元').currencies]), ['USD']);
-
-    // 符号有多义，只要两边有一个共同候选就算一致：$ 与 USD 不该报不一致。
-    // 两个方向都要测：符号在原文侧时会展开成 7 个候选，必须"任一命中"而不是"全部命中"。
-    assert.deepEqual(plain(V.verifyTranslation('USD 100', '$100')), []);
-    assert.deepEqual(plain(V.verifyTranslation('$100', 'USD 100')), []);
-    // 但两边彻底对不上时（USD -> EUR）必须报，这是最容易漏掉的一条。
-    const currencySwap = V.verifyTranslation('USD 100', 'EUR 100');
-    assert.deepEqual(plain(currencySwap).map(item => item.kind), ['currency']);
-    // 译文里货币单位整个消失，也要报。
-    const currencyLost = V.verifyTranslation('USD 100', '100');
-    assert.deepEqual(plain(currencyLost).map(item => item.kind), ['currency']);
-    // 原文没有货币单位时不该凭空报一条。
-    assert.deepEqual(plain(V.verifyTranslation('100 pcs', '100 件')), []);
-
-    // USD12 是"金额 + 数字"，不是型号；真实型号要认得出来。
-    assert.deepEqual(plain([...V.extractHardFacts('USD12').models]), []);
-    assert.deepEqual(plain([...V.extractHardFacts('Model HR-2400 qty 500').models]), ['HR2400']);
-
-    // 该报的要报：术语被改写、型号丢失。
-    const incoterm = V.verifyTranslation('CIF Rotterdam USD 12.5', 'CFR 鹿特丹 12.5 美元');
-    assert.deepEqual(plain(incoterm).map(item => item.kind).sort(), ['incoterm', 'incoterm']);
-    const dropped = V.verifyTranslation('Model HR-2400 qty 500', '型号 数量 500');
-    assert.ok(dropped.some(item => item.kind === 'model' && item.token === 'HR2400'));
-
-    // 原文是中文数字时无法与阿拉伯数字一一对应，只报"丢失"，不报"多出"。
-    assert.deepEqual(plain(V.verifyTranslation('三千套', '3000 sets')), []);
-
-    // 误报修复 ①：模型把阿拉伯数字正当地写成中文数字，不能报"数字丢失"。
-    // 实测案例："6-layer" → "六层" 曾误报"原文的数字 6 没有出现在译文里"。
-    assert.equal(V.parseChineseNumber('六'), 6);
-    assert.equal(V.parseChineseNumber('十五'), 15);
-    assert.equal(V.parseChineseNumber('二十三'), 23);
-    assert.equal(V.parseChineseNumber('三万'), 30000);
-    assert.equal(V.parseChineseNumber('一百零五'), 105);
-    assert.deepEqual(plain([...V.chineseNumeralsAsDigits('六层')]), ['6']);
-    assert.deepEqual(plain(V.verifyTranslation(
-      'HC-B3015-63.3m x 1.5m 6-layer 3-ton pallet rack (1).PDF',
-      'HC-B3015-63.3米×1.5米六层3吨板架(1).PDF'
-    )), []);
-    assert.deepEqual(plain(V.verifyTranslation('500 pcs', '五百件')), []);
-    // 但数字真的丢了还是要报。
-    assert.ok(plain(V.verifyTranslation('500 pcs', '件')).some(item => item.kind === 'number'));
-    // "一共"里的"一"不能凭空造出一个数字来。
-    assert.equal(plain(V.verifyTranslation('500 pcs', '一共 500 件')).length, 0);
-
-    // 误报修复 ②：模型把 Incoterms 意译成中文（EXW → 出厂价），不能报"术语丢失"。
-    // 实测案例：Цена EXW $6,120 → 出厂价 $6,120 曾误报"贸易术语 EXW 在译文里丢失或被改写"。
-    assert.deepEqual(plain(V.verifyTranslation('Цена EXW $6,120', '出厂价 $6,120')), []);
-    assert.deepEqual(plain(V.verifyTranslation('FOB Shanghai USD 100', '上海离岸价 100 美元')), []);
-    assert.deepEqual(plain(V.verifyTranslation('出厂价 6120 美元', 'EXW USD 6120')), []);
-    // 意译成"另一个术语"仍然要报。
-    assert.ok(plain(V.verifyTranslation('Цена EXW $6,120', '价格 6,120 美元')).some(item => item.kind === 'incoterm'));
-    assert.ok(plain(V.verifyTranslation('CIF Rotterdam USD 12.5', '到岸价 鹿特丹 12.5 美元')).length === 0);
-    assert.ok(plain(V.verifyTranslation('FOB Shanghai USD 100', 'CIF 上海 100 美元')).some(item => item.kind === 'incoterm'));
-
-    // 校验绝不能拖垮翻译本身。
-    assert.deepEqual(plain(V.verifyTranslation('', 'x')), []);
-    assert.deepEqual(V.verifyTranslation('FOB 1 2 3 4 5 6 7 8 9', 'nothing').length <= 6, true);
-
-    // 超过 6 条要截断，而截断是"按顺序砍尾巴"，所以顺序本身是有意义的：
-    // 数字与型号最容易出事故，必须排在货币前面，否则一屏 6 条里可能看不到它们。
-    // 注意 HR-2400 里的 2400 会被同时算作"数字"和"型号"的一部分 —— 这是刻意的：
-    // 数字与型号是两套独立检查，型号变了要报型号，数字变了要报数字，互不代替。
-    const kinds = plain(V.verifyTranslation('Model HR-2400 qty 500 USD', 'x')).map(item => item.kind);
-    assert.equal(kinds[0], 'number', '数字要排在最前面');
-    assert.equal(kinds[kinds.length - 1], 'currency', '货币排在最后');
-    assert.ok(kinds.includes('model'), '型号被整段丢掉时也要报出来');
-
-    // 每个翻译出口都必须真的调用校验。
-    const background = source('background.js');
-    assert.match(background, /importScripts\("verify\.js"\)/, '后台应加载 verify.js');
-    assert.doesNotMatch(background, /(^|[^.\w])verifyTranslation\(/m, '必须走 TLP_VERIFY 命名空间，裸名会 ReferenceError');
-
-    // 这里刻意不数"某个函数被调用了几次" —— 那个数字只反映写法，不反映正确性，
-    // 而且新增一个出口时它反而不会报警。直接检查出口本身的形状才是真正防漏的规则：
-    // 凡是返回给客户端的译文对象，都必须带 warnings。
-    // （失败路径的 `text: ""` 没有 warnings，它在到达客户端前就被过滤掉了，不算出口。）
-    const exits = background.split('\n')
-      .map((line, index) => ({ line: line.trim(), number: index + 1 }))
-      .filter(({ line }) => /^return \{ .*\b(?:targetLanguage:|warnings:)/.test(line));
-    assert.ok(exits.length >= 5, `译文出口不该减少，现在只找到 ${exits.length} 处`);
-    for (const { line, number } of exits) {
-      assert.match(line, /\bwarnings:/, `background.js:${number} 的译文出口漏了 warnings`);
-    }
-
-    // 批量路径的三个出口（批量 / DeepL 批量 / 逐条降级）必须共用同一个收口函数，
-    // 否则校验逻辑一散开，就一定会有人漏加其中一条。
-    assert.match(background, /function withWarnings\(item, text\)/, '批量出口要有统一的收口函数');
-    assert.equal((background.match(/(?:return |=> )withWarnings\(item,/g) || []).length, 3,
-      '批量 / DeepL 批量 / 逐条降级 三个出口都要经过 withWarnings');
-    assert.match(source('content.js'), /showWarnings\(/, '字段翻译命中后要提示用户');
-    assert.match(source('timezone.js'), /tlp-chat-translation-warning/, '聊天译文里要内嵌提示');
+    let called = '';
+    const sandbox = backgroundContext(async url => {
+      called = url;
+      return jsonResponse({ candidates: [{ content: { parts: [{ text: '你好' }] }, finishReason: 'STOP' }] });
+    }, { provider: 'gemini', apiKey: 'legacy-key', model: 'gemini-1.0-pro-retired' });
+    const response = await new Promise(resolve => { sandbox.messageHandler({ type: 'TL_TRANSLATE', text: 'Hello', direction: 'en2zh' }, { tab: { id: 1 } }, resolve); });
+    assert.equal(response.ok, true);
+    assert.ok(called.includes(encodeURIComponent(presetModel)),
+      `请求应当用预设模型 ${presetModel}，实际 URL：${called}`);
+    assert.doesNotMatch(called, /1\.0-pro-retired/, '顶层遗留的 model 镜像不该再影响实际请求');
   });
 
-  await test('customer presence drives the online indicator', async () => {
-    const sandbox = presenceModule({ watPresenceIndicator: true });
-    const P = sandbox.presenceApi;
+  // Gemini 的 API Key 必须走请求头，不能拼在 URL 的 ?key= 上：
+  // URL 会进浏览器历史、代理与网络日志，也会随跨域请求的 Referer 泄漏出去。
+  await test('Gemini 的 API Key 走请求头而不是 URL query', async () => {
+    let calledUrl = '';
+    let calledHeaders = null;
+    const sandbox = backgroundContext(async (url, options) => {
+      calledUrl = url;
+      calledHeaders = options?.headers || {};
+      return jsonResponse({ candidates: [{ content: { parts: [{ text: '你好' }] }, finishReason: 'STOP' }] });
+    }, { provider: 'gemini', providerConfigs: { gemini: { apiKey: 'secret-key' } } });
+    const response = await new Promise(resolve => { sandbox.messageHandler({ type: 'TL_TRANSLATE', text: 'Hello', direction: 'en2zh' }, { tab: { id: 1 } }, resolve); });
+    assert.equal(response.ok, true);
+    assert.doesNotMatch(calledUrl, /[?&]key=/, 'Key 不该出现在 URL 上');
+    assert.equal(calledHeaders['x-goog-api-key'], 'secret-key', 'Key 应当放在 x-goog-api-key 请求头里');
+  });
 
-    assert.equal(P.isOnlinePresence('在线'), true);
-    assert.equal(P.isOnlinePresence('online'), true);
-    assert.equal(P.isOnlinePresence('正在输入…'), true, '"正在输入"是比"在线"更明确的信号');
-    // "最后上线时间"里也含"上线"，必须先排掉离线文案，否则会把离线判成在线。
-    assert.equal(P.isOnlinePresence('最后上线时间 昨天 21:10'), false);
-    assert.equal(P.isOnlinePresence('last seen today at 11:43'), false);
-    assert.equal(P.isOnlinePresence(''), false);
+  // DeepL 的 `context` 语义是"帮助消歧的上下文文本"，不是给引擎的系统提示词；
+  // `formality` 只对部分目标语言生效，不支持的语种传了会直接 400、整次翻译失败。
+  await test('DeepL 不把风格指令当 context，formality 只发给支持的语种', async () => {
+    const bodies = [];
+    const makeSandbox = storage => backgroundContext(async (url, options) => {
+      bodies.push(String(options?.body || ''));
+      return jsonResponse({ translations: [{ text: 'Hello' }] });
+    }, {
+      provider: 'deepl',
+      providerConfigs: { deepl: { baseUrl: 'https://api-free.deepl.com/v2', apiKey: 'k' } },
+      ...storage
+    });
+    const send = (sandbox, direction) => new Promise(resolve => {
+      sandbox.messageHandler({ type: 'TL_TRANSLATE', text: '你好', direction }, { tab: { id: 1 } }, resolve);
+    });
 
-    assert.deepEqual(plain(P.detectPresence(fakePresenceHeader('在线'))), { online: true, text: '在线' });
-    assert.deepEqual(plain(P.detectPresence(fakePresenceHeader('最后上线时间 昨天 21:10'))), { online: false, text: '最后上线时间 昨天 21:10' });
-    // WhatsApp 没公开状态（或还没渲染出这一行）时不能假装"离线"。
-    assert.equal(P.detectPresence(null), null);
-    assert.equal(P.detectPresence(fakePresenceHeader(null)), null);
+    // 目标 ZH-HANS：既不在 formality 支持名单里，也不该带 context。
+    await send(makeSandbox({ customerLanguage: 'auto' }), 'en2zh');
+    const zhBody = new URLSearchParams(bodies[0]);
+    assert.equal(zhBody.get('target_lang'), 'ZH-HANS');
+    assert.equal(zhBody.has('formality'), false, 'ZH-HANS 不支持 formality，传了会 400');
+    assert.equal(zhBody.has('context'), false, '英文风格指令不是 DeepL 的 context，不该发出去');
 
-    // 实测踩到的坑：WhatsApp 的图标字体把连字名当成文本渲染，
-    // 状态行被读成 "ic-person-filled"，然后原样显示在面板上，看着像乱码。
-    // 认不出来的文本一律当作"读不到"——宁可收起指示灯，也不要显示内部标识。
-    assert.equal(P.looksLikePresenceText('ic-person-filled'), false);
-    assert.equal(P.looksLikePresenceText('点击此处查看联系人信息'), false);
-    assert.equal(P.looksLikePresenceText(''), false);
-    assert.equal(P.looksLikePresenceText('在线'), true);
-    assert.equal(P.looksLikePresenceText('最后上线时间 昨天 21:10'), true);
-    assert.equal(P.detectPresence(fakePresenceHeader('ic-person-filled')), null, '图标名不能被当成状态文案');
-    // 图标元素要跳过，不能因为它是第一个有文本的节点就采用它。
-    const iconElement = { className: 'ic-person-filled', closest: () => null, getAttribute: () => null };
-    assert.equal(P.isIconLike(iconElement), true, 'ic- 前缀的类名要认成图标');
-    assert.equal(P.isIconLike({ className: 'x1rg5ohu', closest: () => null, getAttribute: () => null }), false);
-    assert.equal(P.isIconLike({ className: '', closest: selector => selector.includes('svg') ? {} : null, getAttribute: () => null }), true, 'svg 里的元素要跳过');
+    // 目标 DE + 商务风格：支持 formality，应当带 prefer_more。
+    bodies.length = 0;
+    await send(makeSandbox({ customerLanguage: 'de', translationProfile: 'business-english' }), 'zh2en');
+    const deBody = new URLSearchParams(bodies[0]);
+    assert.equal(deBody.get('target_lang'), 'DE');
+    assert.equal(deBody.get('formality'), 'prefer_more');
 
-    let fixture = fakePresenceRoot();
-    sandbox.activeHeader = fakePresenceHeader('在线');
-    P.renderPresence(fixture.root, 'Ihor');
-    assert.equal(fixture.marker.hidden, false);
-    assert.equal(fixture.marker.dataset.state, 'online');
-    assert.equal(fixture.detail.textContent, '在线');
-    assert.equal(fixture.detail.dataset.state, 'online');
-    assert.equal(fixture.toggle.checked, true);
-    assert.match(fixture.marker.title, /^客户在线/);
+    // 目标 TR：不在支持名单里，不能带 formality。
+    bodies.length = 0;
+    await send(makeSandbox({ customerLanguage: 'tr', translationProfile: 'business-english' }), 'zh2en');
+    const trBody = new URLSearchParams(bodies[0]);
+    assert.equal(trBody.get('target_lang'), 'TR');
+    assert.equal(trBody.has('formality'), false, 'TR 不在 DeepL 的 formality 支持名单里');
+  });
 
-    // 离线 → 在线要闪一下；一直在线不能反复闪。
-    fixture = fakePresenceRoot();
-    sandbox.activeHeader = fakePresenceHeader('最后上线时间 昨天 21:10');
-    P.renderPresence(fixture.root, 'Ihor');
-    assert.equal(fixture.marker.dataset.state, 'offline');
-    assert.equal(fixture.marker.dataset.flash, undefined);
-    sandbox.activeHeader = fakePresenceHeader('在线');
-    P.renderPresence(fixture.root, 'Ihor');
-    assert.equal(fixture.marker.dataset.flash, '1', '客户刚上线要闪一下');
-    P.renderPresence(fixture.root, 'Ihor');
-    assert.equal(fixture.marker.dataset.flash, '1');
-    // 换联系人不能沿用上一个人的状态，否则会误闪一下"刚上线"。
-    fixture = fakePresenceRoot();
-    P.renderPresence(fixture.root, '另一个客户');
-    assert.equal(fixture.marker.dataset.flash, undefined, '换联系人不应误闪');
+  // 聊天批量翻译有四条出口（免费接口 / DeepL 批量 / AI 批量 / 逐条降级），
+  // 它们必须给出同一个结果形状 { id, text }。
+  // v3.9.10 出过一次同类事故：AI 批量那条漏传了参数，用户换个服务商就静默失效。
+  // 所以这里既做结构守卫（都经过同一个收口函数），也做行为验证（形状真的对）。
+  await test('聊天批量翻译的四条出口给出同一个结果形状', async () => {
+    const background = source('background.js');
+    assert.match(background, /function toChatResult\(item, text\)/, '批量出口要有统一的收口函数');
+    // 只数"调用点"，不数函数声明，也不在乎参数换不换行。
+    assert.equal((background.match(/(?<!function )toChatResult\(/g) || []).length, 4,
+      '免费接口 / DeepL 批量 / AI 批量 / 逐条降级 四个出口都要经过 toChatResult');
 
-    // 关掉开关：指示灯收起，弹层里写明"已关闭"。
-    sandbox.activeConfig = { watPresenceIndicator: false };
-    fixture = fakePresenceRoot();
-    P.renderPresence(fixture.root, 'Ihor');
-    assert.equal(fixture.marker.hidden, true);
-    assert.equal(fixture.detail.textContent, '已关闭');
-    assert.equal(fixture.toggle.checked, false);
-    assert.equal(fixture.root.dataset.presence, undefined);
+    // 行为验证：AI 批量出口真的只返回 { id, text } 两个字段。
+    const batch = await backgroundContext(
+      async () => jsonResponse({
+        choices: [{
+          message: { content: JSON.stringify([{ id: '0', text: '你好' }]) },
+          finish_reason: 'stop'
+        }]
+      }),
+      {
+        provider: 'openai',
+        providerConfigs: { openai: { baseUrl: 'https://api.openai.com/v1', apiKey: 'test-only', model: 'gpt-4o-mini' } }
+      }
+    ).translateChatBatch([{ id: 'a', text: 'Hello' }], 'zh-CN');
 
-    // 开着但读不到状态：收起指示灯，弹层写"—"。
-    sandbox.activeConfig = { watPresenceIndicator: true };
-    fixture = fakePresenceRoot();
-    sandbox.activeHeader = fakePresenceHeader(null);
-    P.renderPresence(fixture.root, 'Ihor');
-    assert.equal(fixture.marker.hidden, true);
-    assert.equal(fixture.detail.textContent, '—');
-
-    // 计算与渲染都要真的接到页面上。
-    const timezoneCode = source('timezone.js');
-    assert.match(timezoneCode, /class="wat-presence-hint"/, '弹层里要有状态行');
-    assert.match(timezoneCode, /renderPresence\(root, state\.title\);/, 'renderKnown 要渲染状态灯');
-    assert.match(timezoneCode, /renderPresence\(root, title\);/, 'renderUnknown 要渲染状态灯');
-    assert.match(timezoneCode, /if \(root\) renderPresence\(root, activeState\?\.title\);/, '定时刷新要同步状态灯');
-    assert.match(timezoneCode, /watPresenceIndicator: true/, 'timezone 要有在线状态默认值');
-
-    // 状态灯要排在摘要条最右侧（当地时间之后），不能再排在最前面。
-    assert.match(timezoneCode, /<span class="wat-time">--:--<\/span>\s*<span class="wat-presence" hidden><\/span>/,
-      '状态灯要排在时间之后');
-    assert.doesNotMatch(timezoneCode, /<span class="wat-presence" hidden><\/span>\s*<span class="wat-region">/,
-      '状态灯不应再排在地区名前面');
-
-    // 快捷开关必须写回与设置页相同的存储键。
-    assert.match(timezoneCode, /\.wat-presence-toggle"\)\.addEventListener\("change", \(event\) => \{\s*safeStorageSet\(\{ watPresenceIndicator: event\.target\.checked \}\)/, '状态开关要写回设置');
-
-    const optionsCode = source('options.js');
-    const optionsHtml = source('options.html');
-    assert.match(optionsHtml, /id="watPresenceIndicator"/, '设置页要能关掉状态灯');
-    assert.match(optionsCode, /watPresenceIndicator: true/, '设置页默认值要与 timezone 一致');
-    assert.match(optionsCode, /\$\("watPresenceIndicator"\)\.checked = settings\.watPresenceIndicator !== false;/, '设置页读取状态开关');
-    assert.match(source('timezone.css'), /\.wat-presence\[data-state="online"\]/, '在线状态灯要有样式');
-
-    // 开关样式。这里钉的是两个真实踩过的坑，不是风格偏好。
-    const css = source('timezone.css');
-    // ① 选择器要带 ID 前缀。下面那条给文本框/下拉用的 `#wat-region-time-root input`
-    //    是 ID 选择器，优先级高于 `.wat-toggle input`，会把 height 改成 34px。
-    //    原生 checkbox 虽然 opacity: 0 看不见，但可点击区域比视觉开关高出一截 ——
-    //    点到开关下方也会切换。
-    assert.match(css, /#wat-region-time-root \.wat-toggle input \{/, '开关的原生 input 规则要带 ID 前缀');
-    assert.match(css, /#wat-region-time-root \.wat-toggle input:focus \{/, '开关的 focus 规则也要带 ID 前缀');
-    // ② 滑块必须绝对定位。用 margin 的话，块级盒子的上外边距会和父级 `i` 合并，
-    //    把滑块整体顶到轨道顶部 —— 看起来偏上、不居中。
-    assert.match(css, /#wat-region-time-root \.wat-toggle i \{[^}]*position: relative/, '轨道要作为滑块的定位参照');
-    assert.match(css, /#wat-region-time-root \.wat-toggle i::after \{[^}]*position: absolute/, '滑块要绝对定位');
-    assert.match(css, /#wat-region-time-root \.wat-toggle i::after \{[^}]*top: 2px/, '滑块上下留白要写死，不能靠外边距');
-    assert.doesNotMatch(css, /#wat-region-time-root \.wat-toggle i::after \{[^}]*margin:/, '滑块不能用 margin 定位');
-    assert.match(css, /#wat-region-time-root \.wat-toggle input:checked \+ i/, '快捷开关要有样式');
+    assert.equal(batch.length, 1);
+    assert.deepEqual(Object.keys(batch[0]).sort(), ['id', 'text'], '出口形状必须是 { id, text }');
+    assert.equal(batch[0].id, 'a');
+    assert.equal(batch[0].text, '你好');
   });
 
   // 移除一个功能最怕"删了渲染、留下设置项"或反过来 —— 半截状态最难维护。
   // 这条用例把"整条链路都不存在"钉死，防止以后有人只补回一半。
-  await test('沟通时间提示功能已彻底移除', async () => {
+  await test('已移除的功能不在界面与数据里留残骸', async () => {
     const removedSymbols = [
+      // 沟通时间提示
       'watContactWorkHint', 'watContactWorkStart', 'watContactWorkEnd', 'watContactWorkWeekends',
       'wat-work', 'renderWorkHint', 'describeContactWorkHours', 'workHourRange',
       'minutesUntilWorkWindow', 'formatWorkGap', 'normalizeWorkHours', 'WORK_DEFAULTS',
-      '提示客户沟通时间', '沟通时间'
+      '提示客户沟通时间', '沟通时间',
+      // 客户在线状态指示灯：状态判断、渲染、样式、设置项、存储键一个都不许留
+      'watPresenceIndicator', 'wat-presence', 'presenceKey', 'lastPresenceOnline', 'presenceFlashUntil',
+      'isOnlinePresence', 'looksLikePresenceText', 'isIconLike', 'getPresenceElement',
+      'detectPresence', 'renderPresence', 'wat-toggle', 'panel-settings', '客户在线状态指示灯',
+      // 硬信息一致性校验 + 自动统一柜型写法：实现、出口、界面、样式一个都不许留
+      'translationAutoNormalize', 'tlp-chat-translation-warning', '自动统一柜型写法',
+      'verifyTranslation', 'normalizeHardFacts', 'TLP_VERIFY'
     ];
     for (const file of ['timezone.js', 'timezone.css', 'options.js', 'options.html', 'options.css']) {
       const text = source(file);
@@ -914,11 +910,20 @@ async function run() {
     const { run: checkDefaults } = require('./defaults-consistency.cjs');
     const { problems, authoritySize } = checkDefaults();
     assert.deepEqual(problems, [], '默认值一致性门禁应通过');
-    assert.equal(authoritySize, 30, `权威默认值应为 30 键，实际 ${authoritySize}`);
+    assert.equal(authoritySize, 29, `权威默认值应为 29 键，实际 ${authoritySize}`);
 
-    // 保留下来的那一项必须还在，别把无关的东西一起删了。
-    assert.match(source('options.html'), /id="watPresenceIndicator"/, '状态灯开关不该被误删');
-    assert.match(source('options.css'), /\.panel-settings/, '设置页对应样式要跟上');
+    // verify.js 是被整文件删掉的，上面那个字符串扫描循环覆盖不到它。
+    assert.equal(fs.existsSync(path.join(root, 'verify.js')), false, 'verify.js 应当已经删除');
+    assert.equal(source('background.js').includes('TLP_VERIFY'), false, '后台不该再引用 TLP_VERIFY');
+    assert.equal(source('background.js').includes('importScripts("verify.js")'), false, '后台不该再加载 verify.js');
+    // 聊天译文里那条"请核对：…"在源码里是 Unicode 转义，字符串扫描搜不到中文。
+    assert.equal(source('timezone.js').includes('\\u8BF7\\u6838\\u5BF9'), false, '聊天译文里不该再内嵌校验提示');
+    assert.equal(source('content.js').includes('showWarnings'), false, '输入框翻译不该再弹校验提示');
+
+    // 状态行本身要留着 —— 那是客户地区与当地时间，不属于被移除的功能。
+    assert.match(source('timezone.js'), /class="wat-time-label"/, '地区时间标签不该被误删');
+    assert.match(source('timezone.css'), /\.wat-time-label/, '地区时间标签的样式不该被误删');
+    assert.match(source('options.html'), /id="watEnabled"/, 'WhatsApp 面板总开关不该被误删');
   });
 
   // 文字系统识别：重构前是 42 个分支的 if 链，且零测试覆盖。
@@ -986,6 +991,133 @@ async function run() {
 
     // 本轮没识别出来时退回用缓存里的结果。
     assert.equal(resolveLanguageState(null, { iso3: 'rus', confidence: 90 }, null).detectedLanguage.iso3, 'rus');
+  });
+
+  // 号码查找三处来源共用同一个循环，且只在"换了联系人"时才重扫页面。
+  await test('号码查找：三处候选共用一个循环，只在换联系人时重扫', async () => {
+    // normalizePhone 换成可控替身：只认 "+7~15 位数字"，方便断言"取到的是哪一个候选"。
+    const fakeNormalize = value => {
+      const match = String(value || '').match(/\+\d{7,15}/);
+      return match ? match[0] : null;
+    };
+    let rectCalls = 0;
+    const element = (text, attrs = {}) => ({
+      textContent: text,
+      getAttribute: name => (name in attrs ? attrs[name] : null),
+      closest: () => null,
+      querySelectorAll: () => [],
+      getBoundingClientRect() { rectCalls += 1; return { width: 100, height: 20, left: 900 }; }
+    });
+
+    // 标题栏：自身属性里就有号码。
+    const header = element('', { title: 'Ihor Petrenko +380676503011' });
+    const P = phoneFinderModule({ normalizePhone: fakeNormalize });
+    assert.equal(P.findPhoneInHeader(header), '+380676503011');
+    // header 还没渲染出来时不能抛（原来这里会 TypeError）。
+    assert.equal(P.findPhoneInHeader(null), null);
+    assert.equal(P.findPhoneInHeader(undefined), null);
+
+    // 会话元数据：从 #main 的候选里取。
+    const metadata = phoneFinderModule({
+      normalizePhone: fakeNormalize,
+      document: {
+        querySelector: selector => (selector === '#main' ? { querySelectorAll: () => [element('', { 'data-jid': '1@c.us' }), element('', { 'data-phone': '+8613800138000' })] } : null),
+        querySelectorAll: () => []
+      }
+    });
+    assert.equal(metadata.findPhoneInChatMetadata(), '+8613800138000');
+    // 没有 #main 时安全返回 null。
+    assert.equal(phoneFinderModule({ document: { querySelector: () => null, querySelectorAll: () => [] } }).findPhoneInChatMetadata(), null);
+
+    // 可见联系人面板：没有 7 位数字的候选要在问布局之前就被筛掉，
+    // 否则上千个 span 每个都要 getBoundingClientRect（强制同步布局）。
+    rectCalls = 0;
+    const panel = phoneFinderModule({
+      normalizePhone: fakeNormalize,
+      document: {
+        querySelector: () => null,
+        querySelectorAll: () => [
+          element('Ihor Petrenko'),
+          element('在线'),
+          element('最后上线时间 昨天 21:10'),
+          element('+380676503011')
+        ]
+      }
+    });
+    assert.equal(panel.findPhoneInVisibleContactPanel(), '+380676503011');
+    assert.equal(rectCalls, 1, `只有真正像号码的那一个才该去问布局，实际问了 ${rectCalls} 次`);
+
+    // 换联系人之前复用上次结果；换人之后必须重扫。
+    let scans = 0;
+    let currentTitle = 'Ihor Petrenko';
+    const cached = phoneFinderModule({
+      normalizePhone: fakeNormalize,
+      getContactTitle: () => currentTitle,
+      document: {
+        querySelector: () => null,
+        querySelectorAll: () => { scans += 1; return [element('+380676503011')]; }
+      }
+    });
+    assert.equal(cached.getPhone(null), '+380676503011');
+    assert.equal(scans, 1);
+    cached.getPhone(null);
+    cached.getPhone(null);
+    assert.equal(scans, 1, '同一个联系人期间的定时刷新不该重扫整个页面');
+    currentTitle = 'Anna Petrova';
+    cached.getPhone(null);
+    assert.equal(scans, 2, '换了联系人必须重扫');
+
+    // 没找到时不缓存：否则用户后来点开联系人面板把号码露出来，我们会一直记着"上次没有"。
+    let attempts = 0;
+    let found = null;
+    const late = phoneFinderModule({
+      normalizePhone: fakeNormalize,
+      getContactTitle: () => 'Ihor Petrenko',
+      document: {
+        querySelector: () => null,
+        querySelectorAll: () => { attempts += 1; return found ? [element(found)] : []; }
+      }
+    });
+    assert.equal(late.getPhone(null), null);
+    found = '+380676503011';
+    assert.equal(late.getPhone(null), '+380676503011', '号码后来才出现时必须能拿到');
+    assert.equal(attempts, 2);
+  });
+
+  // 手动填写的号码是用户对着真实客户核对过的，页面扫描只是猜测。
+  // 让猜测压过人工确认，那个输入框就等于摆设：用户改完还是看到错的号码。
+  // 更糟的是原来"自动识别值回写"会把手动值冲掉，表现是"改完过一会儿又变回去"。
+  await test('号码：手动填写的值压过自动识别，且不会被自动识别冲掉', async () => {
+    // 只有自动识别值：照常显示，并写进 contactMap 当缓存。
+    const auto = contactFactsModule({ detected: '5215500000000' });
+    assert.equal(auto.contactApi.resolveContactFacts(null, { watContactMap: {} }).phone, '5215500000000');
+    assert.deepEqual(plain(auto.writes), [{ watContactMap: { '客户 A': '5215500000000' } }]);
+
+    // 自动识别值没变时不再重复写存储。
+    const stable = contactFactsModule({ detected: '5215500000000' });
+    stable.contactApi.resolveContactFacts(null, { watContactMap: { '客户 A': '5215500000000' } });
+    assert.deepEqual(plain(stable.writes), [], '缓存里已经是同一个号码，不该再写一次');
+
+    // 有手动值时：手动值赢，而且一个字节都不许回写 contactMap。
+    const manual = contactFactsModule({ detected: '5215500000000' });
+    const facts = manual.contactApi.resolveContactFacts(null, {
+      watManualPhones: { '客户 A': '8613800000000' },
+      watContactMap: {}
+    });
+    assert.equal(facts.phone, '8613800000000', '手动值必须压过页面扫描值');
+    assert.deepEqual(plain(manual.writes), [], '有手动值时不许再写 contactMap，否则手动值会被冲掉');
+
+    // 页面没扫到号码时，手动值照样生效。
+    const manualOnly = contactFactsModule({ detected: null });
+    assert.equal(manualOnly.contactApi.resolveContactFacts(null, {
+      watManualPhones: { '客户 A': '8613800000000' }
+    }).phone, '8613800000000');
+
+    // 换到别的联系人，手动值不该串台。
+    const other = contactFactsModule({ title: '客户 B', detected: '5215599999999' });
+    assert.equal(other.contactApi.resolveContactFacts(null, {
+      watManualPhones: { '客户 A': '8613800000000' }
+    }).phone, '5215599999999');
   });
 
   // popup.js 的 render 原本是一个 41 行、复杂度 31 的函数。

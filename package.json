@@ -1,6 +1,6 @@
 {
   "name": "transmate",
-  "version": "3.9.9",
+  "version": "3.9.13",
   "private": true,
   "description": "TransMate - 外贸翻译与客户时区（Chrome MV3 扩展）",
   "type": "commonjs",
