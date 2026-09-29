@@ -29,11 +29,19 @@ const RESERVED_CHAT_SHORTCUTS = new Set([
   "meta+l", "meta+t", "meta+w", "meta+r"
 ]);
 
+/** 把一条禁用记录归一化成可比较的域名（去空白、转小写、去 www 前缀）。 */
+function normalizeHostEntry(entry) {
+  return String(entry || "").trim().toLowerCase().replace(/^www\./, "");
+}
+
+/** 这条禁用记录是否覆盖当前站点。父域名也算（记了 whatsapp.com 就覆盖 web.whatsapp.com）。 */
+function entryCoversCurrentSite(entry) {
+  const clean = normalizeHostEntry(entry);
+  return Boolean(clean) && (host === clean || host.endsWith(`.${clean}`));
+}
+
 function siteDisabled() {
-  return (config.disabledSites || []).some((entry) => {
-    const clean = String(entry || "").trim().toLowerCase().replace(/^www\./, "");
-    return clean && (host === clean || host.endsWith(`.${clean}`));
-  });
+  return (config.disabledSites || []).some(entryCoversCurrentSite);
 }
 
 function formatTime(timezone) {
@@ -73,56 +81,95 @@ async function load() {
   }
 }
 
-function render(current) {
+/**
+ * 合并"服务商预设"与"用户配置"，得到当前实际生效的配置。
+ * Gemini 有历史遗留的顶层 apiKey（v2.x 只存过它），所以要回填 ——
+ * 不回填的话老用户升级后会看到"未配置"。
+ */
+function effectiveProvider() {
+  const preset = globalThis.TLP_PROVIDER_PRESETS?.[config.provider]
+    || globalThis.TLP_PROVIDER_PRESETS?.gemini
+    || {};
+  const merged = { ...preset, ...(config.providerConfigs?.[config.provider] || {}) };
+  if (config.provider === "gemini" && !merged.apiKey) merged.apiKey = config.apiKey;
+  return { preset, merged };
+}
+
+/** 顶部三行：触发次数 / 翻译方向 / 当前站点。 */
+function renderTranslationSummary() {
   $("count").textContent = config.triggerCount || 3;
   $("direction").textContent = DIRECTION_LABELS[config.direction] || DIRECTION_LABELS.auto;
   $("host").textContent = host || "当前页面不可用";
-  const preset = globalThis.TLP_PROVIDER_PRESETS?.[config.provider] || globalThis.TLP_PROVIDER_PRESETS?.gemini || {};
-  const providerConfig = { ...preset, ...(config.providerConfigs?.[config.provider] || {}) };
-  if (config.provider === "gemini" && !providerConfig.apiKey) providerConfig.apiKey = config.apiKey;
-  $("providerName").textContent = preset.label || "翻译服务";
-  const hasRequiredKey = Boolean(providerConfig.apiKey || preset.apiKeyOptional);
-  const hasRequiredModel = TLP_ADAPTERS_WITHOUT_MODEL.includes(preset.adapter) || Boolean(providerConfig.model);
-  $("apiWarning").hidden = Boolean(providerConfig.baseUrl && hasRequiredKey && hasRequiredModel);
+}
 
+/** 服务商名称，以及缺少必填项时的警告条。 */
+function renderProviderStatus() {
+  const { preset, merged } = effectiveProvider();
+  $("providerName").textContent = preset.label || "翻译服务";
+  const hasRequiredKey = Boolean(merged.apiKey || preset.apiKeyOptional);
+  const hasRequiredModel = TLP_ADAPTERS_WITHOUT_MODEL.includes(preset.adapter) || Boolean(merged.model);
+  $("apiWarning").hidden = Boolean(merged.baseUrl && hasRequiredKey && hasRequiredModel);
+}
+
+/** "已启用 / 本站关闭 / 全局关闭" 徽标，以及站点开关按钮的文案。 */
+function renderSiteToggle() {
   const off = !config.enabled || siteDisabled();
   const badge = $("translationBadge");
   badge.textContent = !config.enabled ? "全局关闭" : off ? "本站关闭" : "已启用";
   badge.className = `badge ${off ? "off" : "on"}`;
   $("siteToggle").textContent = !config.enabled ? "前往设置开启翻译" : off ? "为当前网站启用" : "为当前网站停用";
   $("siteToggle").disabled = !host;
+}
 
+/** WhatsApp 面板上的两个开关、快捷键与客户语言。 */
+function renderChatPanelSettings() {
   $("watEnabled").checked = config.watEnabled !== false;
   $("watChatTranslationEnabled").checked = config.watChatTranslationEnabled === true;
   $("chatShortcutLabel").textContent = config.watChatShortcut || "未设置";
   $("customerLanguage").value = config.customerLanguage || "auto";
-  if (current?.region && current?.timezone) {
-    $("contactName").textContent = current.title || "当前联系人";
-    $("timeSummary").textContent = `${current.region}  当地时间：${formatTime(current.timezone)}`;
-    const confidence = current.detectedLanguage?.manual
-      ? "（手动）"
-      : current.detectedLanguage?.confidence
-        ? ` ${current.detectedLanguage.confidence}%`
-        : "";
-    const language = current.detectedLanguage?.name
-      ? ` · 客户语言：${current.detectedLanguage.name}${confidence}`
-      : "";
-    $("timezoneMeta").textContent = `${current.phone} · ${current.timezone}${language}`;
-  } else {
+}
+
+/** 语言识别的置信度后缀：手动指定 > 自动识别的百分比 > 什么都不显示。 */
+function languageConfidenceSuffix(detected) {
+  if (detected?.manual) return "（手动）";
+  if (detected?.confidence) return ` ${detected.confidence}%`;
+  return "";
+}
+
+/** 联系人卡片：识别出时区时显示地区与当地时间，否则给对应的提示文案。 */
+function renderContactInfo(current) {
+  if (!current?.region || !current?.timezone) {
     $("contactName").textContent = current?.title || "请打开一个 WhatsApp 对话";
     $("timeSummary").textContent = current ? "地区未识别" : "等待识别";
     $("timezoneMeta").textContent = current ? "点击页面顶部标签可手动填写号码" : "号码归属地区与当地时间";
+    return;
   }
+  const detected = current.detectedLanguage;
+  const language = detected?.name
+    ? ` · 客户语言：${detected.name}${languageConfidenceSuffix(detected)}`
+    : "";
+  $("contactName").textContent = current.title || "当前联系人";
+  $("timeSummary").textContent = `${current.region}  当地时间：${formatTime(current.timezone)}`;
+  $("timezoneMeta").textContent = `${current.phone} · ${current.timezone}${language}`;
+}
+
+/**
+ * 渲染整个弹窗。原来这是一个 41 行、复杂度 31 的函数，
+ * 里面塞了五件互不相干的事。现在只负责按顺序调用五段渲染。
+ */
+function render(current) {
+  renderTranslationSummary();
+  renderProviderStatus();
+  renderSiteToggle();
+  renderChatPanelSettings();
+  renderContactInfo(current);
 }
 
 $("siteToggle").addEventListener("click", () => {
   if (!config.enabled) return chrome.runtime.openOptionsPage();
   const list = [...(config.disabledSites || [])];
   if (siteDisabled()) {
-    config.disabledSites = list.filter((entry) => {
-      const clean = String(entry || "").trim().toLowerCase().replace(/^www\./, "");
-      return !(host === clean || host.endsWith(`.${clean}`));
-    });
+    config.disabledSites = list.filter((entry) => !entryCoversCurrentSite(entry));
   } else {
     config.disabledSites = [...new Set([...list, host])];
   }

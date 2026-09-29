@@ -90,6 +90,61 @@ function backgroundContext(fetchImpl, storageOverrides = {}, sessionOverrides = 
   return sandbox;
 }
 const jsonResponse = data => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
+// popup.js 直接操作 DOM 和 chrome.*，这里用最小夹具把它整个跑起来。
+// getElementById 按需造元素，所以不用手抄 popup.html 里的 id 列表 ——
+// 抄一份的话，改了 html 而忘了改这里，测试就会假绿。
+function popupContext(storage = {}, session = {}) {
+  const nodes = new Map();
+  const writes = [];
+  const document = {
+    getElementById(id) {
+      if (!nodes.has(id)) {
+        const element = fakeElement();
+        element.id = id;
+        element.listeners = {};
+        element.addEventListener = (type, fn) => { element.listeners[type] = fn; };
+        nodes.set(id, element);
+      }
+      return nodes.get(id);
+    }
+  };
+  const sandbox = {
+    console, Intl, Date, Set, Map, Boolean, String, Number, Object, Array, URL,
+    document,
+    chrome: {
+      tabs: { query: async () => [{ id: 1, url: 'https://web.whatsapp.com/' }] },
+      storage: {
+        local: {
+          get: async defaults => ({ ...defaults, ...storage }),
+          set: async values => { writes.push(values); }
+        },
+        session: {
+          get: async keys => {
+            const wanted = typeof keys === 'string' ? [keys] : (Array.isArray(keys) ? keys : Object.keys(keys || {}));
+            const result = {};
+            for (const key of wanted) if (key in session) result[key] = session[key];
+            return result;
+          }
+        },
+        onChanged: { addListener() {} }
+      },
+      runtime: { openOptionsPage() {} }
+    }
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(source('providers.js'), sandbox, { filename: 'providers.js' });
+  // 去掉末尾自动执行的 load()，改由测试自己驱动，
+  // 避免"文件一加载就跑一次渲染"污染断言。
+  const code = source('popup.js').replace(
+    /\bload\(\);\s*$/,
+    'globalThis.popupApi = { render, load };\n'
+  );
+  assert.ok(code.includes('globalThis.popupApi'), 'popup.js 末尾的 load() 没被替换掉，测试夹具需要更新');
+  vm.runInContext(code, sandbox, { filename: 'popup.js' });
+  // 只暴露 render / load 这两个对外行为。
+  // 刻意不暴露内部函数名 —— 测行为不测结构，这样重构时测试不用跟着改。
+  return { sandbox, api: sandbox.popupApi, element: id => document.getElementById(id), writes };
+}
 function verifyApi() {
   const sandbox = { console };
   vm.createContext(sandbox);
@@ -855,6 +910,103 @@ async function run() {
     const { detectByScript } = scriptDetectModule();
     assert.equal(detectByScript('hello world'), null);
     assert.equal(detectByScript(''), null);
+  });
+
+  // popup.js 的 render 原本是一个 41 行、复杂度 31 的函数。
+  // 重构前先把它的对外行为钉死 —— 这几条只断言 DOM 上的结果，
+  // 不碰任何内部函数名，所以拆成几个函数之后它们不需要改。
+  const fullProvider = {
+    provider: 'custom',
+    providerConfigs: { custom: { baseUrl: 'https://api.example.com/v1', apiKey: 'test-only', model: 'test-only' } }
+  };
+
+  await test('popup 的服务商警告条只在缺必填项时出现', async () => {
+    const complete = popupContext(fullProvider);
+    await complete.api.load();
+    complete.api.render(null);
+    assert.equal(complete.element('apiWarning').hidden, true, '配置齐全时不该警告');
+
+    const noKey = popupContext({ provider: 'custom', providerConfigs: { custom: { baseUrl: 'https://api.example.com/v1', model: 'm' } } });
+    await noKey.api.load();
+    noKey.api.render(null);
+    assert.equal(noKey.element('apiWarning').hidden, false, '缺 API Key 要警告');
+
+    const noUrl = popupContext({ provider: 'custom', providerConfigs: { custom: { apiKey: 'k', model: 'm' } } });
+    await noUrl.api.load();
+    noUrl.api.render(null);
+    assert.equal(noUrl.element('apiWarning').hidden, false, '缺接口地址要警告');
+
+    // 免费档没有 API Key 也能用，不该弹警告。
+    const free = popupContext({ provider: 'googlefree' });
+    await free.api.load();
+    free.api.render(null);
+    assert.equal(free.element('apiWarning').hidden, true, '免费档不该警告');
+    assert.equal(free.element('providerName').textContent, 'Google 翻译（免费）');
+  });
+
+  await test('popup 的 Gemini 回填历史遗留的顶层 apiKey', async () => {
+    // v2.x 只存过顶层 apiKey，没有 providerConfigs。老用户升级后不能变成"未配置"。
+    const legacy = popupContext({ provider: 'gemini', apiKey: 'legacy-key' });
+    await legacy.api.load();
+    legacy.api.render(null);
+    assert.equal(legacy.element('apiWarning').hidden, true, '老用户只存过 apiKey 时不该被判定为未配置');
+  });
+
+  await test('popup 的启用徽标区分全局关闭 / 本站关闭 / 已启用', async () => {
+    const enabled = popupContext({ ...fullProvider, enabled: true, disabledSites: [] });
+    await enabled.api.load();
+    enabled.api.render(null);
+    assert.equal(enabled.element('translationBadge').textContent, '已启用');
+    assert.equal(enabled.element('translationBadge').className, 'badge on');
+
+    const siteOff = popupContext({ ...fullProvider, enabled: true, disabledSites: ['whatsapp.com'] });
+    await siteOff.api.load();
+    siteOff.api.render(null);
+    assert.equal(siteOff.element('translationBadge').textContent, '本站关闭', '父域名应当覆盖子域名');
+    assert.equal(siteOff.element('translationBadge').className, 'badge off');
+    assert.equal(siteOff.element('siteToggle').textContent, '为当前网站启用');
+
+    const globalOff = popupContext({ ...fullProvider, enabled: false, disabledSites: [] });
+    await globalOff.api.load();
+    globalOff.api.render(null);
+    assert.equal(globalOff.element('translationBadge').textContent, '全局关闭');
+    assert.equal(globalOff.element('siteToggle').textContent, '前往设置开启翻译');
+  });
+
+  await test('popup 停用本站时只移除覆盖当前站点的记录', async () => {
+    const ctx = popupContext({ ...fullProvider, enabled: true, disabledSites: ['www.WhatsApp.com', 'example.com'] });
+    await ctx.api.load();
+    ctx.api.render(null);
+    ctx.element('siteToggle').listeners.click();
+    const written = ctx.writes.at(-1);
+    assert.ok(written && 'disabledSites' in written, '点击后应写回 disabledSites');
+    assert.deepEqual(plain(written.disabledSites), ['example.com'],
+      '带 www 前缀 / 大小写不同的记录也要被识别为"覆盖当前站点"并移除');
+  });
+
+  await test('popup 的联系人卡片在识别不出时区时给提示文案', async () => {
+    const ctx = popupContext(fullProvider);
+    await ctx.api.load();
+
+    ctx.api.render({ title: 'Ihor', region: '乌克兰', timezone: 'Europe/Kyiv', phone: '+380 44', detectedLanguage: { name: '乌克兰语', confidence: 96 } });
+    assert.equal(ctx.element('contactName').textContent, 'Ihor');
+    assert.match(ctx.element('timeSummary').textContent, /^乌克兰 {2}当地时间：\d{2}:\d{2}$/);
+    assert.equal(ctx.element('timezoneMeta').textContent, '+380 44 · Europe/Kyiv · 客户语言：乌克兰语 96%');
+
+    // 手动指定过语言时显示"（手动）"而不是置信度。
+    ctx.api.render({ title: 'Ihor', region: '乌克兰', timezone: 'Europe/Kyiv', phone: '+380 44', detectedLanguage: { name: '俄语', manual: true, confidence: 99 } });
+    assert.equal(ctx.element('timezoneMeta').textContent, '+380 44 · Europe/Kyiv · 客户语言：俄语（手动）');
+
+    // 有联系人但识别不出时区。
+    ctx.api.render({ title: 'Ihor' });
+    assert.equal(ctx.element('timeSummary').textContent, '地区未识别');
+    assert.equal(ctx.element('timezoneMeta').textContent, '点击页面顶部标签可手动填写号码');
+
+    // 一个联系人也没有。
+    ctx.api.render(null);
+    assert.equal(ctx.element('contactName').textContent, '请打开一个 WhatsApp 对话');
+    assert.equal(ctx.element('timeSummary').textContent, '等待识别');
+    assert.equal(ctx.element('timezoneMeta').textContent, '号码归属地区与当地时间');
   });
 
   const manifest = JSON.parse(source('manifest.json'));
