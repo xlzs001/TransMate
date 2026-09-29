@@ -295,7 +295,15 @@ function printReport(report) {
   }
 }
 
-module.exports = { analyzeAll, printReport };
+/**
+ * 全部函数（带 file 字段），不做 top-N 截断。
+ * 质量预算门禁要用它逐个比对上限，不能只看前 12 个。
+ */
+function collectFunctions() {
+  return FILES.flatMap(file => analyze(file).functions.map(fn => ({ ...fn, file })));
+}
+
+module.exports = { analyzeAll, collectFunctions, printReport };
 
 if (require.main === module) {
   const report = analyzeAll();

@@ -4093,6 +4093,28 @@
     const language = MANUAL_LANGUAGE_BY_CODE.get(code);
     return language ? { ...language, iso3: null, confidence: null, manual: true } : null;
   }
+  /**
+   * 决定这次显示哪个客户语言，以及要不要把新识别结果写进缓存。
+   *
+   * 优先级：手动指定 > 本轮新识别 > 上次缓存的识别结果。
+   * 纯函数 —— 输入都是已经读出来的值，不碰存储也不碰 DOM，所以可以直接测。
+   *
+   * shouldCache 的判据是"确实变了才写"：置信度够高，且 iso3 或置信度与缓存不同。
+   * 少了这个判断，页面上每次一点风吹草动都会写一次存储。
+   */
+  function resolveLanguageState(freshLanguage, cachedLanguage, savedManualCode) {
+    const manualLanguage = makeManualLanguage(savedManualCode);
+    const automaticLanguage = freshLanguage || cachedLanguage;
+    const changed = Boolean(freshLanguage)
+      && freshLanguage.confidence >= 60
+      && (cachedLanguage?.iso3 !== freshLanguage.iso3 || cachedLanguage?.confidence !== freshLanguage.confidence);
+    return {
+      automaticLanguage,
+      manualLanguageCode: manualLanguage?.code || null,
+      detectedLanguage: manualLanguage || automaticLanguage,
+      shouldCache: changed
+    };
+  }
   function detectLanguageHint(text) {
     const normalized = String(text || "").toLocaleLowerCase().replace(/[^\p{L}\p{M}\s']/gu, " ").replace(/\s+/g, " ").trim();
     if (!normalized) return null;
@@ -4899,18 +4921,12 @@
     );
     activeState = state;
   }
-  async function update() {
-    if (stopped) return;
-    updateTimer = null;
-    const generation = ++renderGeneration;
-    const header = getHeader();
-    if (!header) {
-      document.getElementById(ROOT_ID)?.remove();
-      activeHeader = null;
-      activeState = null;
-      publishCurrent(null);
-      return;
-    }
+  /**
+   * 读取并归一当前生效的设置。
+   * 返回 null 表示这次读取作废：存储读失败，或者期间又触发了一次 update。
+   * （generation 比对是为了防止"慢的那次覆盖快的那次"）
+   */
+  async function loadActiveConfig(generation) {
     const stored = await safeStorageGet({
       ...DISPLAY_DEFAULTS,
       [STORAGE.contactMap]: {},
@@ -4918,80 +4934,140 @@
       [STORAGE.languageOverrides]: {},
       [STORAGE.overrides]: {}
     });
-    if (!stored) return;
-    if (generation !== renderGeneration) return;
+    if (!stored) return null;
+    if (generation !== renderGeneration) return null;
     activeConfig = { ...DISPLAY_DEFAULTS, ...stored };
+    // 浏览器把快捷键占了就换回默认值并写回存储，
+    // 否则用户每次打开都会看到一个已经被占用、按了没反应的快捷键。
     if (isBrowserReservedChatShortcut(activeConfig.watChatShortcut)) {
       activeConfig.watChatShortcut = DISPLAY_DEFAULTS.watChatShortcut;
       safeStorageSet({ watChatShortcut: DISPLAY_DEFAULTS.watChatShortcut });
     }
+    return stored;
+  }
+
+  /** 按设置开启或关闭聊天翻译。会话已经在进行时，立刻排一次翻译。 */
+  function syncChatTranslation() {
     if (activeConfig.watChatTranslationEnabled !== true) {
       deactivateChatTranslation();
     } else if (chatTranslationSessionActive) {
       scheduleChatTranslation(activeConfig, 0);
     }
-    if (stored[STORAGE.enabled] === false) {
-      document.getElementById(ROOT_ID)?.remove();
-      activeState = null;
-      publishCurrent(null);
-      return;
-    }
+  }
+
+  /** 面板该消失时的统一收尾：移除 DOM、清空状态、通知外部。 */
+  function detachPanel() {
+    document.getElementById(ROOT_ID)?.remove();
+    activeState = null;
+    publishCurrent(null);
+  }
+
+  /**
+   * 收集渲染需要的联系人事实：标题、号码、客户语言。
+   * 顺带把新识别出来的号码和语言写进缓存 —— 只在确实变了的时候写。
+   */
+  function resolveContactFacts(header, stored) {
     const title = getContactTitle(header);
     const freshLanguage = detectCustomerLanguage(getRecentIncomingMessages());
     const detectedPhone = getPhone(header);
     const cachedPhone = stored[STORAGE.contactMap]?.[title];
     const phone = detectedPhone || cachedPhone || null;
+    // 号码识别不出来时退回用标题当键，保证同一联系人前后两次用的是同一个键。
     const languageKey = phone || title;
     const cachedLanguage = stored[STORAGE.languageCache]?.[languageKey] || null;
-    const automaticLanguage = freshLanguage || cachedLanguage;
-    const savedManualCode = stored[STORAGE.languageOverrides]?.[languageKey] || null;
-    const manualLanguage = makeManualLanguage(savedManualCode);
-    const manualLanguageCode = manualLanguage?.code || null;
-    const detectedLanguage = manualLanguage || automaticLanguage;
-    if (freshLanguage && freshLanguage.confidence >= 60 && (cachedLanguage?.iso3 !== freshLanguage.iso3 || cachedLanguage?.confidence !== freshLanguage.confidence)) {
-      const languageCache = {
-        ...stored[STORAGE.languageCache] || {},
-        [languageKey]: freshLanguage
-      };
-      safeStorageSet({ [STORAGE.languageCache]: languageCache });
+    const language = resolveLanguageState(
+      freshLanguage,
+      cachedLanguage,
+      stored[STORAGE.languageOverrides]?.[languageKey] || null
+    );
+    if (language.shouldCache) {
+      safeStorageSet({
+        [STORAGE.languageCache]: { ...stored[STORAGE.languageCache] || {}, [languageKey]: freshLanguage }
+      });
     }
-    const root = attachRoot(header, activeConfig);
-    const languageState = { languageKey, automaticLanguage, manualLanguageCode };
-    if (!phone) {
-      renderUnknown(root, title, detectedLanguage, languageState);
-      publishCurrent(activeState);
-      return;
+    if (detectedPhone && cachedPhone !== detectedPhone) {
+      safeStorageSet({
+        [STORAGE.contactMap]: { ...stored[STORAGE.contactMap] || {}, [title]: detectedPhone }
+      });
     }
-    if (detectedPhone && stored[STORAGE.contactMap]?.[title] !== detectedPhone) {
-      const contactMap = { ...stored[STORAGE.contactMap] || {}, [title]: detectedPhone };
-      safeStorageSet({ [STORAGE.contactMap]: contactMap });
-    }
+    return {
+      title,
+      phone,
+      detectedLanguage: language.detectedLanguage,
+      languageState: {
+        languageKey,
+        automaticLanguage: language.automaticLanguage,
+        manualLanguageCode: language.manualLanguageCode
+      }
+    };
+  }
+
+  /** 拿到号码之后的分支：解析归属地，能解析就渲染完整卡片，否则渲染"地区未识别"。 */
+  function renderByPhone(root, facts, stored) {
+    const { title, phone, detectedLanguage, languageState } = facts;
     const parsed = parsePhoneNumber4(phone);
     const countryCode = parsed?.country;
     const country = countryCode ? getCountry(countryCode) : null;
     const timezones2 = countryCode ? getTimezoneNames(countryCode) : [];
     if (!countryCode || !country || !timezones2.length) {
       renderUnknown(root, title, detectedLanguage, languageState);
-      root.querySelector(".wat-phone").textContent = phone;
-      root.querySelector(".wat-phone").title = phone;
+      const phoneNode = root.querySelector(".wat-phone");
+      phoneNode.textContent = phone;
+      phoneNode.title = phone;
       activeState = { ...activeState, phone };
       publishCurrent(activeState);
       return;
     }
     const override = stored[STORAGE.overrides]?.[phone]?.timezone;
-    const timezone = chooseTimezone(countryCode, timezones2, override);
     const state = {
       title,
       phone,
       countryCode,
       region: regionNames.of(countryCode) || country.name,
-      timezone,
+      timezone: chooseTimezone(countryCode, timezones2, override),
       timezones: timezones2,
       detectedLanguage,
       ...languageState
     };
     renderKnown(root, state);
     publishCurrent(state);
+  }
+
+  /**
+   * 刷新面板。
+   * 原来这是一个 94 行、复杂度 32 的函数，读设置、算状态、渲染全挤在一起。
+   * 现在只负责"按顺序做决定"，具体动作交给上面几个函数。
+   */
+  async function update() {
+    if (stopped) return;
+    updateTimer = null;
+    const generation = ++renderGeneration;
+
+    const header = getHeader();
+    if (!header) {
+      activeHeader = null;
+      detachPanel();
+      return;
+    }
+
+    const stored = await loadActiveConfig(generation);
+    if (!stored) return;
+
+    syncChatTranslation();
+
+    if (stored[STORAGE.enabled] === false) {
+      detachPanel();
+      return;
+    }
+
+    const facts = resolveContactFacts(header, stored);
+    const root = attachRoot(header, activeConfig);
+    if (!facts.phone) {
+      renderUnknown(root, facts.title, facts.detectedLanguage, facts.languageState);
+      publishCurrent(activeState);
+      return;
+    }
+    renderByPhone(root, facts, stored);
   }
   function scheduleUpdate(delay = 180) {
     if (stopped) return;

@@ -104,6 +104,19 @@ const GATES = [
           .join('\n')
       };
     }
+  },
+  {
+    name: '质量预算',
+    guards: '函数越写越长、越写越绕 —— 已经改好的地方再退回去',
+    run() {
+      const { run: check } = require('./quality-budget.cjs');
+      const result = check();
+      return {
+        ok: result.ok,
+        summary: `名单内 ${result.allowedCount} 处 / ${result.problemCount} 个问题`,
+        detail: result.problems.map(item => '- ' + item).join('\n')
+      };
+    }
   }
 ];
 

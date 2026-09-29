@@ -209,6 +209,28 @@ function scriptDetectModule() {
   );
   return sandbox.scriptApi;
 }
+// resolveLanguageState 是纯函数（不碰存储、不碰 DOM），只依赖一张手动语言表，
+// 整段切出来就能测。其中"要不要写缓存"的判据是最容易改错的地方：
+// 放宽一点，页面上每次一点风吹草动都会写一次存储。
+function languageStateModule(manualLanguages = [['ru', '俄语', 'Russian']]) {
+  const src = source('timezone.js');
+  const start = src.indexOf('  function makeManualLanguage(');
+  const end = src.indexOf('  function detectLanguageHint(', start);
+  assert.ok(start > -1 && end > start, 'timezone.js 里应存在 makeManualLanguage / resolveLanguageState');
+  const sandbox = {
+    console,
+    MANUAL_LANGUAGE_BY_CODE: new Map(
+      manualLanguages.map(([code, name, promptName]) => [code, { code, name, promptName }])
+    )
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    src.slice(start, end) + '\nglobalThis.languageApi = { resolveLanguageState, makeManualLanguage };',
+    sandbox,
+    { filename: 'timezone-language.js' }
+  );
+  return sandbox.languageApi;
+}
 function fakePresenceHeader(presenceText) {
   if (!presenceText) return { querySelector: () => null };
   const subtitle = {
@@ -910,6 +932,40 @@ async function run() {
     const { detectByScript } = scriptDetectModule();
     assert.equal(detectByScript('hello world'), null);
     assert.equal(detectByScript(''), null);
+  });
+
+  await test('语言状态：手动指定覆盖自动识别', async () => {
+    const { resolveLanguageState } = languageStateModule();
+    const fresh = { iso3: 'ukr', confidence: 96, name: '乌克兰语' };
+
+    const auto = plain(resolveLanguageState(fresh, null, null));
+    assert.equal(auto.detectedLanguage.name, '乌克兰语');
+    assert.equal(auto.detectedLanguage.manual, undefined);
+    assert.equal(auto.manualLanguageCode, null);
+
+    const manual = plain(resolveLanguageState(fresh, null, 'ru'));
+    assert.equal(manual.detectedLanguage.name, '俄语', '手动指定的语言优先');
+    assert.equal(manual.detectedLanguage.manual, true);
+    assert.equal(manual.manualLanguageCode, 'ru');
+    // 手动指定不该影响缓存判据 —— 缓存里存的一直是"自动识别的结果"。
+    assert.equal(manual.shouldCache, true);
+  });
+
+  await test('语言状态：只有识别结果确实变了才写缓存', async () => {
+    const { resolveLanguageState } = languageStateModule();
+    const fresh = { iso3: 'ukr', confidence: 96 };
+
+    assert.equal(resolveLanguageState(null, null, null).shouldCache, false, '什么都没识别出来不该写');
+    assert.equal(resolveLanguageState(fresh, null, null).shouldCache, true, '首次识别出高置信度结果要写');
+    assert.equal(resolveLanguageState(fresh, { iso3: 'ukr', confidence: 96 }, null).shouldCache, false,
+      '与缓存完全一致不该写 —— 否则每次页面变化都会写一次存储');
+    assert.equal(resolveLanguageState(fresh, { iso3: 'rus', confidence: 96 }, null).shouldCache, true, 'iso3 变了要写');
+    assert.equal(resolveLanguageState(fresh, { iso3: 'ukr', confidence: 80 }, null).shouldCache, true, '置信度变了要写');
+    assert.equal(resolveLanguageState({ iso3: 'ukr', confidence: 42 }, null, null).shouldCache, false,
+      '置信度低于 60 不该写 —— 避免把一次猜测固化下来');
+
+    // 本轮没识别出来时退回用缓存里的结果。
+    assert.equal(resolveLanguageState(null, { iso3: 'rus', confidence: 90 }, null).detectedLanguage.iso3, 'rus');
   });
 
   // popup.js 的 render 原本是一个 41 行、复杂度 31 的函数。

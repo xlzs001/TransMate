@@ -13,6 +13,7 @@
     "test:regression": "node temp/regression-checks.cjs",
     "test:review": "node temp/review-checks.cjs",
     "test:defaults": "node temp/defaults-consistency.cjs",
+    "test:budget": "node temp/quality-budget.cjs",
     "test:relay": "node temp/relay-smoke.mjs",
     "metrics": "node temp/quality-metrics.cjs",
     "preview": "node temp/preview-ui.cjs"
